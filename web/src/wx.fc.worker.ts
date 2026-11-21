@@ -4,23 +4,25 @@ import * as zarr from "zarrita";
 import { HRRR } from "./wx.grid";
 
 /**
- * The hour's fire weather as one score, from the HRRR 48 hour forecast store (dynamical.org, 3 km), one shard at a
+ * The hour's fire weather as the Fosberg index, from the HRRR 48 hour forecast store (dynamical.org, 3 km), one shard at a
  * time. The store keeps each run in pieces of 300 x 265 pixels (about 900 x 800 km) holding all of the run's hours;
  * the lower 48 is 24 of them.
  *
- * The score is the weather part of the ignition head of aef-landcover-fosberg-cog (models/ignition_logit.json, fit on
- * 22,204 wildfire starts against nearby points at other hours): a weighted sum of the Fosberg index, 2 m temperature,
- * relative humidity and 10 m wind, in logits. Hot, dry, windy hours score high.
+ * The index (Fosberg 1978) is the 10 m wind times how dry the air would make fine dead fuel (its equilibrium moisture,
+ * from 2 m temperature and humidity), 0 to about 100 and past it in the strongest dry wind. It has no term for heat
+ * on its own, so a cold, dry wind (Santa Ana, Diablo) reads as high as a hot one. A fitted ignition score that also
+ * weighed temperature left such days under the gate (the Camp fire's morning, 8.7 C: Fosberg 43, in that fall's top
+ * 4 % of hours); against the 2026 California wildfires the two tell fire hours from other days about equally.
  *
  * A shard's hours are a chain of runs 48 hours apart, each run's first 48 hours, the newest run last (so the chain
  * ends two days ahead of that run's start). After each run two sets of frames go back, oldest run first, so the map
  * fills forward in time while the later runs are still coming:
- *   frames  the score of each hour
- *   slow    the same score sustained: it rises with the hour's score at once and falls back toward it slowly (a
+ *   frames  the index of each hour
+ *   slow    the same index sustained: it rises with the hour's index at once and falls back toward it slowly (a
  *           memory of SLOW hours on the way down), given every SLOW_STEP hours. A place that is lifted every
- *           afternoon stays lifted through the nights between; it lets go over a couple of days once the hot, dry
+ *           afternoon stays lifted through the nights between; it lets go over a couple of days once the dry
  *           wind stops coming back.
- * Both as bytes: 0 where there is none, 1 to 255 over TERM_LO to TERM_HI.
+ * Both as bytes: 0 where there is none, 1 to 255 over FOS_LO to FOS_HI.
  */
 
 const URL_ = "https://dynamical-noaa-hrrr.s3.us-west-2.amazonaws.com/noaa-hrrr-forecast-48-hour/v0.1.0.icechunk";
@@ -28,14 +30,12 @@ const VARS = ["temperature_2m", "relative_humidity_2m", "wind_u_10m", "wind_v_10
 export const SHARD = { w: 300, h: 265 };
 /** Hours taken from each run. */
 export const RUN_HOURS = 48;
-/** The sustained score: how long it holds on the way down (hours), and the hours between its frames. */
+/** The sustained index: how long it holds on the way down (hours), and the hours between its frames. */
 const SLOW = 48;
 export const SLOW_STEP = 3;
-export const TERM_LO = -6, TERM_HI = 6;
-/** The head's weather inputs: weight, and the mean and spread they were scaled by (Fosberg, deg C, percent, m/s). */
-const W = { ffwi: [-0.16230474855586324, 16.678741198055963, 13.197587332656665], t: [0.6628038301659839, 17.88455161384719, 10.032864575742538], rh: [-0.5549916574015389, 44.238219400525516, 24.157877178327944], wind: [0.36938999709829046, 3.848127975677117, 2.4595160400134612] } as const;
-const zOf = (k: keyof typeof W, v: number) => (W[k][0] * (v - W[k][1])) / W[k][2];
-const byteOf = (z: number) => 1 + Math.round(254 * Math.min(1, Math.max(0, (z - TERM_LO) / (TERM_HI - TERM_LO))));
+/** The index's range in the bytes (half a point a step). */
+export const FOS_LO = 0, FOS_HI = 127;
+const byteOf = (z: number) => 1 + Math.round(254 * Math.min(1, Math.max(0, (z - FOS_LO) / (FOS_HI - FOS_LO))));
 /** Runs are every 6 hours since this time. */
 const ORIGIN = Date.UTC(2018, 6, 13, 12), INIT_STEP = 6 * 3_600_000;
 
@@ -84,7 +84,7 @@ async function shard(id: number, row: number, col: number) {
   const y0 = row * SHARD.h, x0 = col * SHARD.w, h = Math.min(SHARD.h, HRRR.h - y0), w = Math.min(SHARD.w, HRRR.w - x0);
   const px = h * w;
   const read = (k: number) => Promise.all(VARS.map((v) => zarr.get(arrays[v], [inits[k]!, zarr.slice(0, RUN_HOURS), zarr.slice(y0, y0 + h), zarr.slice(x0, x0 + w)])));
-  // the sustained score carries over from run to run
+  // the sustained index carries over from run to run
   const built = new Float32Array(px).fill(NaN);
   const keep = Math.exp(-1 / SLOW);
   // the next run is fetched while this one is worked
@@ -99,8 +99,7 @@ async function shard(id: number, row: number, col: number) {
       for (let p = 0; p < px; p++) {
         const t = T![o + p]!, rh = RH![o + p]!, u = U![o + p]!, v = V![o + p]!;
         if (t === t && rh === rh && u === u && v === v) {
-          const ms = Math.hypot(u, v);
-          const z = zOf("ffwi", fosberg(emc(rh, t), ms * 2.2369363)) + zOf("t", t) + zOf("rh", rh) + zOf("wind", ms);
+          const z = fosberg(emc(rh, t), Math.hypot(u, v) * 2.2369363);
           frames[o + p] = byteOf(z);
           // up at once with the hour, down slowly: a place that lights each afternoon stays lit through the night
           built[p] = built[p]! > z ? z + (built[p]! - z) * keep : z;

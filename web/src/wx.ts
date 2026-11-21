@@ -2,12 +2,12 @@ import type { Device } from "@luma.gl/core";
 
 import { setWxTex } from "./risk";
 import type { FcAnswer, FcAsk } from "./wx.fc.worker";
-import { RUN_HOURS, SHARD, SLOW_STEP, TERM_HI, TERM_LO } from "./wx.fc.worker";
+import { FOS_HI, FOS_LO, RUN_HOURS, SHARD, SLOW_STEP } from "./wx.fc.worker";
 import FcWorker from "./wx.fc.worker.ts?worker";
 import { HRRR, hrrrXY } from "./wx.grid";
 
 /**
- * The weather on the map: the hour's fire weather score, and the same score built up over days, read in the browser
+ * The weather on the map: the hour's Fosberg index, and the same index built up over days, read in the browser
  * from the HRRR forecast store (wx.fc.worker.ts), only the shards under the view. Each shard's runs arrive oldest
  * first and are put into two textures (a layer per frame) that the map's shader reads at every screen pixel, so the
  * picture fills forward in time as the data comes; nothing here colors anything. Frames a shard does not have yet
@@ -199,7 +199,7 @@ export function createWeather(onChange: () => void, onError: (m: string) => void
       });
     },
     /**
-     * The weather score at a place and an hour (fractions blend the two hours around it), each hour's or the built-up
+     * The Fosberg index at a place and an hour (fractions blend the two hours around it), each hour's or the built-up
      * one; NaN where not in hand.
      */
     value(lon: number, lat: number, frame: number, builtUp: boolean): number {
@@ -216,7 +216,7 @@ export function createWeather(onChange: () => void, onError: (m: string) => void
         acc += w * (a + (b - a) * u);
         wsum += w;
       }
-      return wsum > 0.01 ? TERM_LO + ((acc / wsum - 1) / 254) * (TERM_HI - TERM_LO) : NaN;
+      return wsum > 0.01 ? FOS_LO + ((acc / wsum - 1) / 254) * (FOS_HI - FOS_LO) : NaN;
     },
   };
 }

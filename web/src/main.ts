@@ -7,6 +7,7 @@ import maplibreWorkerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&ur
 
 import { cellM, createField } from "./field";
 import { createFine } from "./fine";
+import { createGoes } from "./goes";
 import { createOverture } from "./overture";
 import { cssGradient, INFERNO_50, VIRIDIS_50, volT } from "./ramp";
 import { look } from "./risk";
@@ -54,15 +55,17 @@ card.innerHTML = `
         <div class="at-row"><span class="at-lab">Time</span><input type="range" class="time" min="0" max="1" step="0.01" value="0" aria-label="Time within the window"></div>
         <label class="tick"><input type="checkbox" class="sus"> Sustained: ground the weather has lit stays lit, and lets go over a couple of days</label>
         <div class="wxkey"><span><i class="c"></i>lifted by the weather</span><span><i class="g"></i>not lifted</span></div>
-        <div class="at-row"><span class="at-lab">Lights from</span><input type="range" class="line" min="-2" max="4" step="0.1" aria-label="Weather score at which the ground lights"><span class="linev"></span></div>
-        <div class="sub">The gray under everything is the hour's fire weather (Fosberg, temperature, humidity, wind as one score): paler where hotter, drier, windier. Ground under it lights in color. <span class="span"></span></div>
+        <label class="tick"><input type="checkbox" class="fires" checked> Fires seen by GOES-West, outlined in blue: bright where burning in the last 3 hours, faint around all seen so far</label>
+        <div class="sub firen"></div>
+        <div class="at-row"><span class="at-lab">Lights from</span><input type="range" class="line" min="5" max="80" step="1" aria-label="Fosberg index at which the ground lights"><span class="linev"></span></div>
+        <div class="sub">The gray under everything is the hour's Fosberg index (wind and how dry the air is): paler where drier and windier. Ground lights in color where the index is over the line. <span class="span"></span></div>
       </div>
     </div>
     <div class="zoom"></div>
     <div class="status ground"></div>
     <div class="status"></div>
-    <div class="keys"><kbd>F</kbd> full screen &nbsp; <kbd>H</kbd> all of California &nbsp; <kbd>W</kbd> weather &nbsp; <kbd>S</kbd> sustained &nbsp; <kbd>Space</kbd> play &nbsp; <kbd>[</kbd><kbd>]</kbd> step</div>
-    <div class="credits">AlphaEarth Foundations embeddings (Google, via Source Cooperative) &middot; LANDFIRE-trained volume head &middot; A5 cells &middot; NOAA HRRR forecast (dynamical.org) &middot; basemap &copy; CARTO, &copy; OpenStreetMap contributors &middot; Overture Maps Foundation</div>
+    <div class="keys"><kbd>F</kbd> full screen &nbsp; <kbd>H</kbd> all of California &nbsp; <kbd>W</kbd> weather &nbsp; <kbd>S</kbd> sustained &nbsp; <kbd>G</kbd> fires &nbsp; <kbd>Space</kbd> play &nbsp; <kbd>[</kbd><kbd>]</kbd> step</div>
+    <div class="credits">AlphaEarth Foundations embeddings (Google, via Source Cooperative) &middot; LANDFIRE-trained volume head &middot; A5 cells &middot; NOAA HRRR forecast (dynamical.org) &middot; NOAA GOES-18 fire detection &middot; basemap &copy; CARTO, &copy; OpenStreetMap contributors &middot; Overture Maps Foundation</div>
   </div>`;
 top.append(card);
 document.body.append(bar, tag, top, tip);
@@ -75,9 +78,12 @@ $(".wxkey .g").style.background = "linear-gradient(90deg, #060606, #f4f4f4)";
 const map = new maplibregl.Map({ container: mapEl, style: STYLE, bounds: HOME, fitBoundsOptions: { padding: 24 }, attributionControl: false, hash: true, ...FLAT });
 const overlay = new MapLibreOverlay({ interleaved: true, layers: [], onError: (e) => say(`deck: ${e?.message ?? e}`) });
 map.addControl(overlay as unknown as maplibregl.IControl);
+// the fires go on their own layer over the map, so moving the time redraws them alone
+const fireOverlay = new MapLibreOverlay({ interleaved: false, layers: [] });
+map.addControl(fireOverlay as unknown as maplibregl.IControl);
 (globalThis as unknown as { __map?: maplibregl.Map }).__map = map;
 // for the headless checks: the two cell stores
-queueMicrotask(() => Object.assign(globalThis, { __fuel: { field, fine, ground, wx, look } }));
+queueMicrotask(() => Object.assign(globalThis, { __fuel: { field, fine, ground, wx, look, goes } }));
 
 let note = "";
 function say(m: string) {
@@ -88,11 +94,33 @@ function say(m: string) {
 
 // the weather: Fosberg hour by hour, read under the view
 const wx = createWeather(() => {
+  const t = wx.times;
+  if (t.length) goes.window(t[0]!, t[t.length - 1]!);
   draw();
   status();
   readout();
   wxPanel();
+  drawFires();
 }, say);
+
+// the fires GOES-West saw over the weather's hours, read scan by scan from NOAA
+const goes = createGoes(() => {
+  drawFires();
+  status();
+  readout();
+}, say);
+/** The time shown (ms), from the place on the weather's time axis. */
+const shownTime = () => (wx.times.length > 1 ? wx.times[0]! + look.frame * (wx.times[1]! - wx.times[0]!) : 0);
+/** Fires change by the scan, a quarter hour apart. */
+const QUARTER = 900_000;
+let fireSlot = -1;
+function drawFires() {
+  const t = shownTime();
+  fireSlot = Math.floor(t / QUARTER);
+  fireOverlay.setProps({ layers: t ? goes.layers(fireSlot * QUARTER + QUARTER) : [] });
+  const n = t && goes.on ? goes.count(fireSlot * QUARTER + QUARTER) : null;
+  $(".firen").textContent = n ? `${n.hot} pixel${n.hot === 1 ? "" : "s"} burning now, ${n.seen} so far.` : "";
+}
 
 // the fuel as tiles made from the A5 cells; they draw under the basemap's labels
 let firstLabel: string | undefined;
@@ -124,8 +152,9 @@ function draw() {
 
 const km = (m: number) => (m >= 1000 ? `${(m / 1000).toFixed(m >= 10_000 ? 0 : 1)} km` : m >= 100 ? `${Math.round(m / 10) * 10} m` : `${Math.round(m)} m`);
 function status() {
-  const p = field.progress(), f = fine.progress(), g = ground.status(), wp = wx.progress();
-  const loading = !p.ready || !p.done || !f.done || g.reading.length > 0 || !wp.done;
+  const p = field.progress(), f = fine.progress(), g = ground.status(), wp = wx.progress(), gp = goes.progress();
+  const fires = goes.on && wx.times.length > 0 && !gp.done;
+  const loading = !p.ready || !p.done || !f.done || g.reading.length > 0 || !wp.done || fires;
   const got = p.got + f.got + wp.got, total = p.total + f.total + wp.total;
   bar.classList.toggle("on", loading);
   (bar.firstElementChild as HTMLElement).style.width = `${total ? (100 * got) / total : 0}%`;
@@ -138,7 +167,9 @@ function status() {
         ? `Reading the 10 m embeddings<span>${f.got} of ${f.total} chunks</span>`
         : !wp.done
           ? `Reading the weather<span>${Math.floor(wp.got)} of ${wp.total || "?"} runs</span>`
-          : `Reading ${g.reading.join(", ")}<span>Overture Maps</span>`;
+          : fires
+            ? `Reading GOES fire scans<span>${gp.got} of ${gp.total || "?"}</span>`
+            : `Reading ${g.reading.join(", ")}<span>Overture Maps</span>`;
   $(".zoom").textContent = fine.active
     ? `Cells about ${km(cellM(fine.res))} across (A5 resolution ${fine.res}), made here from the 10 m embeddings`
     : field.res
@@ -182,13 +213,15 @@ function readout() {
   const tc = pointer && !fc ? field.at(pointer.lon, pointer.lat) : null;
   const vol = fc ? fc.vol : tc ? volOf(tc.t) : NaN;
   const fos = pointer && wx.st.on ? wx.value(pointer.lon, pointer.lat, look.frame, look.sustained > 0.5) : NaN;
-  const on = vol === vol || fos === fos;
+  const fire = pointer ? goes.at(pointer.lon, pointer.lat, (fireSlot + 1) * QUARTER) : null;
+  const on = vol === vol || fos === fos || !!fire;
   tip.classList.toggle("on", on);
   if (!on || !pointer) return;
   let html = vol === vol ? `<div class="v"><b>${num(vol)}</b> m of fuel</div><div class="s">canopy cover times height</div>` : `<div class="v">no ground here</div>`;
   if (fos === fos) {
-    html += `<div class="v wxv"><b>${fos >= 0 ? "+" : "\u2212"}${Math.abs(fos).toFixed(1)}</b> weather${look.sustained > 0.5 ? ", sustained" : " this hour"}</div><div class="s">${fos >= look.gate ? "lifting the ground" : `lifts the ground from ${look.gate >= 0 ? "+" : "\u2212"}${Math.abs(look.gate).toFixed(1)}`}</div>`;
+    html += `<div class="v wxv"><b>${Math.round(fos)}</b> Fosberg${look.sustained > 0.5 ? ", sustained" : " this hour"}</div><div class="s">${fos >= look.gate ? "lighting the ground" : `lights the ground from ${look.gate}`}</div>`;
   } else if (wx.st.on) html += `<div class="s">weather not read yet</div>`;
+  if (fire) html += `<div class="v wxv"><b>Fire</b> ${fire.hot ? "burning" : "seen earlier"}</div><div class="s">GOES-West, first seen ${when(fire.first)}${fire.scans > 1 ? `, last ${when(fire.last)}` : ""}; somewhere in this 2 by 3 km pixel</div>`;
   tip.innerHTML = html;
   const r = tip.getBoundingClientRect();
   const x = pointer.x + 16 + r.width > innerWidth ? pointer.x - 16 - r.width : pointer.x + 16;
@@ -236,6 +269,7 @@ function setFrame(f: number) {
   look.frame = Math.min(last(), Math.max(0, f));
   moved = true;
   map.triggerRepaint();
+  if (Math.floor(shownTime() / QUARTER) !== fireSlot) drawFires();
 }
 function wxPanel() {
   const on = wx.st.on;
@@ -247,7 +281,7 @@ function wxPanel() {
   card.querySelector<HTMLElement>(".key .ticks")!.style.display = on ? "none" : "";
   const ends = card.querySelectorAll<HTMLElement>(".key .ends span");
   ends[0]!.textContent = on ? "lower" : "least fuel";
-  ends[1]!.textContent = on ? "higher: heavy fuel in hot, dry wind" : "most fuel";
+  ends[1]!.textContent = on ? "higher: heavy fuel in dry wind" : "most fuel";
   $(".unit").textContent = on ? "" : "Canopy cover times height, in meters";
   for (const b of card.querySelectorAll<HTMLElement>(".onoff button")) b.classList.toggle("on", (b.dataset.on === "1") === on);
   for (const b of card.querySelectorAll<HTMLElement>(".win button")) b.classList.toggle("on", WINDOWS[Number(b.dataset.w)]!.end === wx.st.end);
@@ -261,7 +295,7 @@ function wxPanel() {
   const at = n ? wx.times[0]! + look.frame * (wx.times[1]! - wx.times[0]!) : 0;
   $(".day").textContent = n ? `${when(at)}${at > Date.now() + 1_800_000 ? ", forecast" : ""}` : "reading the weather";
   $<HTMLInputElement>(".line").value = String(look.gate);
-  $(".linev").textContent = `${look.gate >= 0 ? "+" : "\u2212"}${Math.abs(look.gate).toFixed(1)}`;
+  $(".linev").textContent = String(look.gate);
   $(".play").innerHTML = playing ? "&#10073;&#10073;" : "&#9654;";
 }
 function tickPlay(now: number) {
@@ -304,6 +338,9 @@ $<HTMLInputElement>(".sus").onchange = (e) => {
   readout();
   map.triggerRepaint();
 };
+$<HTMLInputElement>(".fires").onchange = (e) => {
+  goes.on = (e.target as HTMLInputElement).checked;
+};
 $<HTMLInputElement>(".line").oninput = (e) => {
   look.gate = Number((e.target as HTMLInputElement).value);
   wxPanel();
@@ -322,6 +359,7 @@ window.addEventListener("keydown", (e) => {
   else if (e.key === "h" || e.key === "H") map.fitBounds(HOME, { padding: 24 });
   else if (e.key === "w" || e.key === "W") wx.set({ on: !wx.st.on });
   else if (e.key === "s" || e.key === "S") $<HTMLInputElement>(".sus").click();
+  else if (e.key === "g" || e.key === "G") $<HTMLInputElement>(".fires").click();
   else if (e.key === " ") (e.preventDefault(), togglePlay());
   else if (e.key === "[") step(-1);
   else if (e.key === "]") step(1);

@@ -6,20 +6,26 @@ import { HRRR } from "./wx.grid";
 
 /**
  * The one picture every layer draws, per screen pixel, the way aef-landcover-fosberg-cog draws it (its aef/render.ts):
- * the ground's own score and the hour's weather score, both in logits, summed and put through a sigmoid.
+ * the ground's own score and what the hour's weather adds to it, in logits, summed and put through a sigmoid. The
+ * weather is the Fosberg index (wx.fc.worker.ts): the ground lights where the index crosses the gate, and the index
+ * past the gate pushes it up the ramp.
  *
  * - Here the ground's score is its fuel: the volume head's 0..1 stretched over GROUND_LO..GROUND_HI, the span of that
  *   app's ground scores.
- * - The weather is drawn in gray under everything, ground or not: dark three logits under the gate, pale one over it.
+ * - The weather is drawn in gray under everything, ground or not: dark 30 points under the gate, pale 10 over it.
  * - The ground is faint and gray (the ramp's own lightness, colored by the ground alone) where the weather is under
- *   the gate, and goes opaque and takes its color (ground plus weather) over half a logit as the weather crosses it.
+ *   the gate, and goes opaque and takes its color (ground plus weather) over LIT_BAND points as the index crosses it.
  * - The ramp runs over the probability from pHide to pMax.
- * The weather score read is the hour's own, or the built-up one (look.sustained). With the weather off the ramp shows
+ * The index read is the hour's own, or the built-up one (look.sustained). With the weather off the ramp shows
  * the fuel alone, on its own ramp.
  */
 
-/** The weather score's range in the textures (a byte holds 1 to 255 over it). */
-export const TERM_LO = -6, TERM_HI = 6;
+/** The Fosberg index's range in the textures (a byte holds 1 to 255 over it). */
+export const FOS_LO = 0, FOS_HI = 127;
+/** Points of the index over which the ground comes up to full color past the gate. */
+const LIT_BAND = 5;
+/** What the weather adds to the ground's logit: this much at the gate, and one more for every LIFT_PER points past it. */
+const LIFT_AT_GATE = 1, LIFT_PER = 20;
 const GROUND_LO = -2.43, GROUND_HI = 2.8;
 
 export const look = {
@@ -29,8 +35,8 @@ export const look = {
   sustained: 0,
   /** The place on the weather's time axis, in hours and fractions of one. */
   frame: 0,
-  /** The weather score at which the ground goes opaque and takes its color. */
-  gate: 1.0,
+  /** The Fosberg index at which the ground goes opaque and takes its color. */
+  gate: 30,
   /** The ramp: hidden below this probability, its top at this one. */
   pHide: 0.5,
   pMax: 0.95,
@@ -149,7 +155,7 @@ vec2 riskGrid(vec2 ll) {
 }
 
 /**
- * The weather score (logits) at a grid point and frame, read as a smooth surface (a cubic B-spline over the 4 x 4 pixels
+ * The Fosberg index at a grid point and frame, read as a smooth surface (a cubic B-spline over the 4 x 4 pixels
  * around the point, as four blended reads) and blended between the two frames around the time. Pixels not in hand
  * drop out by the mask. -99: no weather here.
  */
@@ -177,7 +183,7 @@ float riskWx(vec2 g, float frame) {
     acc += w * a;
     m += w * texture(maskTex, uv).r;
   }
-  return m > 0.25 ? ${f(TERM_LO)} + (acc / m * 255.0 - 1.0) / 254.0 * ${f(TERM_HI - TERM_LO)} : -99.0;
+  return m > 0.25 ? ${f(FOS_LO)} + (acc / m * 255.0 - 1.0) / 254.0 * ${f(FOS_HI - FOS_LO)} : -99.0;
 }
 
 /** The color of a place: its fuel (0..1), how much of the pixel is ground (0..1), and where it is (degrees). */
@@ -188,18 +194,18 @@ vec4 riskShade(float fuel, float cover, vec2 lonlat) {
   }
   float wx = riskWx(riskGrid(lonlat), risk.frame);
   bool has = wx > -90.0;
-  // the ground's score, and with the weather on top where the weather is across the gate (over half a logit)
+  // the ground's score, and with the weather's lift on top where the index is across the gate
   float g = mix(${f(GROUND_LO)}, ${f(GROUND_HI)}, fuel);
-  float lit = has ? smoothstep(risk.gate, risk.gate + 0.5, wx) : 0.0;
-  float z = mix(g, g + wx, lit);
+  float lit = has ? smoothstep(risk.gate, risk.gate + ${f(LIT_BAND)}, wx) : 0.0;
+  float z = mix(g, g + ${f(LIFT_AT_GATE)} + (wx - risk.gate) / ${f(LIFT_PER)}, lit);
   float t = clamp((1.0 / (1.0 + exp(-z)) - risk.pHide) / max(risk.pMax - risk.pHide, 0.0001), 0.0, 1.0);
   vec3 rgb = texture(rampTex, vec2(t, 0.5)).rgb;
   // the standing picture in gray (the ramp's lightness), color only where the weather lifts the pixel
   rgb = mix(vec3(dot(rgb, vec3(0.2126, 0.7152, 0.0722))), rgb, lit);
   float a = cover * mix(risk.standing, 1.0, lit);
   if (has && risk.field > 0.0) {
-    // the weather under the ground: dark three logits below the gate, pale one above it
-    float tf = clamp((wx - (risk.gate - 3.0)) / 4.0, 0.0, 1.0);
+    // the weather under the ground: dark 30 points below the gate, pale 10 above it
+    float tf = clamp((wx - (risk.gate - 30.0)) / 40.0, 0.0, 1.0);
     vec3 under = vec3(0.10 + 0.80 * tf);
     float ao = a + risk.field * (1.0 - a);
     rgb = (rgb * a + under * risk.field * (1.0 - a)) / max(ao, 1e-4);

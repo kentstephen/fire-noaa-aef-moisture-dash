@@ -22,11 +22,24 @@ const EARTH_M2 = 5.1007e14;
 /** A cell's width in m: the side of a square of its area. */
 export const cellM = (res: number) => Math.sqrt(EARTH_M2 / (60 * 4 ** (res - 1)));
 
-export function resFor(zoom: number, lat: number) {
-  const mpp = (78271.517 * Math.cos((lat * Math.PI) / 180)) / 2 ** zoom;
+/**
+ * The resolution for a zoom. It goes by the zoom alone (the screen scale at California's middle), so panning north or
+ * south never changes it, and it holds the resolution on screen until the zoom is clearly past the step (a fifth of
+ * a zoom level either way), so a small nudge of the zoom does not flip it back and forth.
+ */
+const REF_LAT = 37;
+const HOLD = 0.2;
+function plainRes(zoom: number) {
+  const mpp = (78271.517 * Math.cos((REF_LAT * Math.PI) / 180)) / 2 ** zoom;
   for (let r = RES_HI; r > RES_LO; r--) if (cellM(r) >= CELL_PX * mpp) return r;
   return RES_LO;
 }
+export function resFor(zoom: number, now = 0) {
+  const lo = plainRes(zoom - HOLD), hi = plainRes(zoom + HOLD);
+  return now >= lo && now <= hi ? now : plainRes(zoom);
+}
+/** A coarse level kept whole and drawn under everything, so ground not read yet is coarse, never empty. */
+const BASE_RES = 11;
 
 type Group = {
   res: number;
@@ -69,6 +82,7 @@ export function createCells(onChange: () => void, onError: (m: string) => void) 
         index.set(r, { lo: BigUint64Array.from(at, (i) => d.lo[i]!), hi: BigUint64Array.from(at, (i) => d.hi[i]!) });
       }
       if (pendingView) view(pendingView.zoom, pendingView.bbox);
+      else ask({ type: "want", jobs: base().map((rg) => ({ res: BASE_RES, rg })) });
     } else if (d.type === "group") {
       groups.set(key(d.res, d.rg), { res: d.res, rg: d.rg, cells: d.cells, vol: d.vol, n: d.n, tris: d.tris, ...polygonBatch(d.coords, d.rings), color: colorData(d.colors), seen: tick });
       trim();
@@ -80,9 +94,11 @@ export function createCells(onChange: () => void, onError: (m: string) => void) 
     }
   };
 
+  const base = () => [...(index.get(BASE_RES)?.lo.keys() ?? [])];
+
   function trim() {
     if (groups.size <= MAX_GROUPS) return;
-    const keep = new Set([...want.rgs.map((rg) => key(want.res, rg)), ...back.rgs.map((rg) => key(back.res, rg))]);
+    const keep = new Set([...want.rgs.map((rg) => key(want.res, rg)), ...back.rgs.map((rg) => key(back.res, rg)), ...base().map((rg) => key(BASE_RES, rg))]);
     const old = [...groups].filter(([k]) => !keep.has(k)).sort((a, b) => a[1].seen - b[1].seen);
     for (const [k] of old) {
       if (groups.size <= MAX_GROUPS) break;
@@ -141,16 +157,17 @@ export function createCells(onChange: () => void, onError: (m: string) => void) 
     pendingView = { zoom, bbox };
     if (!index.size) return;
     tick++;
-    const res = resFor(zoom, (bbox[1] + bbox[3]) / 2);
+    const res = resFor(zoom, want.res);
     const rgs = rowGroups(res, bbox);
-    if (res !== want.res && whole(want)) back = want;
+    if (res !== want.res && want.res && (whole(want) || !back.res)) back = want;
     want = { res, rgs };
     for (const rg of rgs) {
       const g = groups.get(key(res, rg));
       if (g) g.seen = tick;
     }
     if (whole(want)) back = { res: 0, rgs: [] };
-    ask({ type: "want", jobs: rgs.filter((rg) => !groups.has(key(res, rg)) && !failed.has(key(res, rg))).map((rg) => ({ res, rg })) });
+    const todo = (r: number, list: number[]) => list.filter((rg) => !groups.has(key(r, rg)) && !failed.has(key(r, rg))).map((rg) => ({ res: r, rg }));
+    ask({ type: "want", jobs: [...todo(BASE_RES, base()), ...todo(res, rgs)] });
     onChange();
   }
 
@@ -187,7 +204,9 @@ export function createCells(onChange: () => void, onError: (m: string) => void) 
     layers(beforeId: string | undefined) {
       if (whole(want) && back.res) back = { res: 0, rgs: [] };
       const out = [];
-      for (const w of back.res && back.res !== want.res ? [back, want] : [want]) {
+      const under: Want[] = want.res > BASE_RES ? [{ res: BASE_RES, rgs: base() }] : [];
+      if (back.res && back.res !== want.res && back.res !== BASE_RES) under.push(back);
+      for (const w of [...under, want]) {
         for (const rg of w.rgs) {
           const g = groups.get(key(w.res, rg));
           if (!g) continue;

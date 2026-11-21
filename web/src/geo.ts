@@ -1,4 +1,4 @@
-import { GeoArrowSolidPolygonLayer } from "@geoarrow/deck.gl-layers";
+import { GeoArrowPathLayer, GeoArrowSolidPolygonLayer } from "@geoarrow/deck.gl-layers";
 import { Field, FixedSizeList, Float64, List, makeData, RecordBatch, Schema, Struct, Uint8 } from "apache-arrow";
 
 /** Pentagons as GeoArrow, for both kinds of cells on the map: the baked ones (cells.ts) and the ones made here (fine.ts). */
@@ -26,6 +26,33 @@ export function polygonBatch(coords: Float64Array, rings: Int32Array) {
   return { batch, poly: poly as unknown };
 }
 
+/** Lines as one GeoArrow record batch: coords is x, y of every point, starts the first point of each line and the total at the end. */
+export function lineBatch(coords: Float64Array, starts: Int32Array) {
+  const points = coords.length / 2;
+  const xy = makeData({ type: XY, length: points, nullCount: 0, child: makeData({ type: new Float64(), length: points * 2, nullCount: 0, data: coords }) });
+  const line = makeData({ type: RING, length: starts.length - 1, nullCount: 0, valueOffsets: starts, child: xy });
+  const f = new Field("geometry", RING, false, new Map([["ARROW:extension:name", "geoarrow.linestring"]]));
+  const batch = new RecordBatch(new Schema([f]), makeData({ type: new Struct([f]), length: starts.length - 1, nullCount: 0, children: [line] }));
+  return { batch, line: line as unknown };
+}
+
+/** Lines in one color and width (screen pixels), drawn under the basemap's labels. */
+export function lineLayer(id: string, g: { batch: RecordBatch; line: unknown }, color: [number, number, number, number], width: number, beforeId: string | undefined) {
+  return new GeoArrowPathLayer({
+    id,
+    data: g.batch,
+    getPath: g.line as never,
+    getColor: color,
+    getWidth: width,
+    widthUnits: "pixels",
+    capRounded: true,
+    jointRounded: true,
+    pickable: false,
+    // read by the MapLibre overlay: the layer draws under the labels
+    beforeId,
+  } as never);
+}
+
 /** One RGBA per polygon as an Arrow column the layer takes for its fill. */
 export const colorData = (rgba: Uint8Array): unknown =>
   makeData({ type: RGBA, length: rgba.length / 4, nullCount: 0, child: makeData({ type: new Uint8(), length: rgba.length, nullCount: 0, data: rgba }) });
@@ -38,7 +65,7 @@ export class CellLayer extends GeoArrowSolidPolygonLayer<{ tris: Uint32Array; be
   }
 }
 
-export function cellLayer(id: string, g: { batch: RecordBatch; poly: unknown; color: unknown; tris: Uint32Array }, beforeId: string | undefined) {
+export function cellLayer(id: string, g: { batch: RecordBatch; poly: unknown; color: unknown | [number, number, number, number]; tris: Uint32Array }, beforeId: string | undefined) {
   return new CellLayer({
     id,
     data: g.batch,

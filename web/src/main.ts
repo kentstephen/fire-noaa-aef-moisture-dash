@@ -7,6 +7,7 @@ import maplibreWorkerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&ur
 
 import { cellM, createCells } from "./cells";
 import { createFine } from "./fine";
+import { createOverture } from "./overture";
 import { cssGradient, VIRIDIS_50, volT } from "./ramp";
 
 maplibregl.setWorkerUrl(maplibreWorkerUrl);
@@ -44,9 +45,10 @@ card.innerHTML = `
       <div class="unit">Canopy cover times height, in meters, averaged over each cell</div>
     </div>
     <div class="zoom"></div>
+    <div class="status ground"></div>
     <div class="status"></div>
     <div class="keys"><kbd>F</kbd> full screen &nbsp; <kbd>H</kbd> all of California</div>
-    <div class="credits">AlphaEarth Foundations embeddings (Google, via Source Cooperative) &middot; LANDFIRE-trained volume head &middot; A5 cells &middot; basemap &copy; CARTO, &copy; OpenStreetMap contributors</div>
+    <div class="credits">AlphaEarth Foundations embeddings (Google, via Source Cooperative) &middot; LANDFIRE-trained volume head &middot; A5 cells &middot; basemap &copy; CARTO, &copy; OpenStreetMap contributors &middot; Overture Maps Foundation</div>
   </div>`;
 top.append(card);
 document.body.append(bar, tag, top, tip);
@@ -59,7 +61,7 @@ const overlay = new MapLibreOverlay({ interleaved: true, layers: [], onError: (e
 map.addControl(overlay as unknown as maplibregl.IControl);
 (globalThis as unknown as { __map?: maplibregl.Map }).__map = map;
 // for the headless checks: the two cell stores
-queueMicrotask(() => Object.assign(globalThis, { __fuel: { cells, fine } }));
+queueMicrotask(() => Object.assign(globalThis, { __fuel: { cells, fine, ground } }));
 
 let note = "";
 function say(m: string) {
@@ -82,8 +84,14 @@ const fine = createFine(() => {
   readout();
 }, say);
 
+// zoomed in, what is on the ground as context: Overture's roads, power lines and buildings
+const ground = createOverture(() => {
+  draw();
+  status();
+}, say);
+
 function draw() {
-  overlay.setProps({ layers: [...cells.layers(firstLabel), ...fine.layers(firstLabel)] });
+  overlay.setProps({ layers: [...cells.layers(firstLabel), ...fine.layers(firstLabel), ...ground.layers(firstLabel)] });
   map.triggerRepaint();
 }
 
@@ -105,7 +113,13 @@ function status() {
     : cells.res
       ? `Cells about ${km(cellM(cells.res))} across (A5 resolution ${cells.res})`
       : "";
-  $(".status").textContent = note;
+  const g = ground.status();
+  $(".ground").textContent = !ground.active
+    ? ""
+    : g.reading.length
+      ? `Reading ${g.reading.join(", ")} from Overture Maps`
+      : `Roads thin, power lines bold, buildings from zoom 14 (Overture Maps)${g.notes.length ? `; ${g.notes.join("; ")}` : ""}`;
+  $(".status:not(.ground)").textContent = note;
 }
 
 let viewTimer = 0;
@@ -114,6 +128,7 @@ function askView() {
   const box: [number, number, number, number] = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()];
   cells.view(map.getZoom(), box);
   fine.view(map.getZoom(), box);
+  ground.view(map.getZoom(), box);
   draw();
   status();
 }

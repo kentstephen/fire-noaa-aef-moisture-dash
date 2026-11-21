@@ -81,3 +81,21 @@ button:focus-visible { outline: 2px solid var(--cool); outline-offset: 2px; }
 .tip .v b { font-size: 18px; font-weight: 600; }
 .tip .s { color: var(--muted); font-size: 11.5px; white-space: nowrap; }
 .tip .v + .s { margin-top: 5px; }
+
+/* the weather's part of the card: primed fuel or all fuel, the day, the pace, the line */
+.seg-f { display: flex; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 9px; width: max-content; align-items: center; font-size: 12.5px; }
+.seg-f button { border: 0; background: none; color: var(--muted); padding: 3px 10px; border-radius: 7px; cursor: pointer; font: inherit; }
+.seg-f button:hover { color: var(--text); }
+.seg-f button.on { background: var(--text); color: var(--on); }
+.at-row { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.at-lab { font-size: 12.5px; color: var(--muted); min-width: 64px; }
+.wx { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.card.nowx .wxbody { display: none; }
+.dayrow { display: flex; align-items: center; gap: 6px; margin-top: 10px; }
+.dayrow .day { font-size: 20px; font-weight: 600; flex: 1; text-align: center; white-space: nowrap; }
+.step { background: none; border: 1px solid var(--line); color: var(--text); border-radius: 6px; width: 28px; height: 30px; font-size: 16px; cursor: pointer; padding: 0; }
+.step:hover { border-color: rgba(255, 255, 255, 0.4); }
+.wx input[type="range"] { flex: 1; min-width: 0; accent-color: var(--text); }
+.wx .linev { font-size: 12.5px; min-width: 22px; text-align: right; }
+.wxkey { display: flex; gap: 14px; font-size: 11.5px; color: var(--muted); margin-top: 8px; }
+.wxkey i { display: inline-block; width: 22px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }

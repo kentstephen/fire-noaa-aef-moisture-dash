@@ -1,9 +1,10 @@
-import { cellToBoundary } from "a5-js";
+import { cellToBoundary, cellToLonLat } from "a5-js";
 import { tableFromIPC } from "apache-arrow";
 import initWasm, { ParquetFile } from "parquet-wasm/esm";
 import wasmUrl from "parquet-wasm/esm/parquet_wasm_bg.wasm?url";
 
 import { rampInto, volT } from "./ramp";
+import { hrrrXY } from "./wx.grid";
 
 /**
  * Reads the cells from Parquet (parquet-wasm, HTTP range requests, one row group at a time) and turns each cell
@@ -17,7 +18,7 @@ export type Ask =
   | { type: "want"; jobs: { res: number; rg: number }[] };
 export type Answer =
   | { type: "index"; res: Int8Array; rg: Int32Array; lo: BigUint64Array; hi: BigUint64Array }
-  | { type: "group"; res: number; rg: number; cells: BigUint64Array; vol: Float32Array; n: Int32Array; coords: Float64Array; rings: Int32Array; tris: Uint32Array; colors: Uint8Array }
+  | { type: "group"; res: number; rg: number; cells: BigUint64Array; vol: Float32Array; n: Int32Array; coords: Float64Array; rings: Int32Array; tris: Uint32Array; colors: Uint8Array; wx: Float32Array }
   | { type: "error"; res?: number; rg?: number; message: string };
 
 const post = (a: Answer, transfer: Transferable[] = []) => (self as unknown as Worker).postMessage(a, transfer);
@@ -47,6 +48,8 @@ async function readGroup(res: number, rg: number) {
   let coords = new Float64Array(count * 12);
   const rings = new Int32Array(count + 1);
   const colors = new Uint8Array(count * 4);
+  // each cell's center on the weather grid (HRRR, 3 km): column, row
+  const wx = new Float32Array(count * 2);
   // each pentagon as a fan of three triangles from its first corner (the cells are convex), so the page has no cutting to do
   let tris = new Uint32Array(count * 9);
   let q = 0;
@@ -76,12 +79,14 @@ async function readGroup(res: number, rg: number) {
     }
     rings[i + 1] = p;
     rampInto(colors, 4 * i, volT(vol[i]!));
+    const ctr = cellToLonLat(cells[i]!);
+    hrrrXY(ctr[0], ctr[1], wx, 2 * i);
   }
   if (p * 2 !== coords.length) coords = coords.slice(0, p * 2);
   if (q !== tris.length) tris = tris.slice(0, q);
   // copies of the columns: the table's own buffers are views into the IPC bytes
   const c2 = cells.slice(), v2 = vol.slice(), n2 = n.slice();
-  post({ type: "group", res, rg, cells: c2, vol: v2, n: n2, coords, rings, tris, colors }, [c2.buffer, v2.buffer, n2.buffer, coords.buffer, rings.buffer, tris.buffer, colors.buffer]);
+  post({ type: "group", res, rg, cells: c2, vol: v2, n: n2, coords, rings, tris, colors, wx }, [c2.buffer, v2.buffer, n2.buffer, coords.buffer, rings.buffer, tris.buffer, colors.buffer, wx.buffer]);
 }
 
 function pump() {

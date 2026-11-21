@@ -4,6 +4,8 @@ import type { RecordBatch } from "apache-arrow";
 import type { Answer, Ask } from "./cells.worker";
 import CellsWorker from "./cells.worker.ts?worker";
 import { cellLayer, colorData, polygonBatch } from "./geo";
+import type { Weather } from "./wx";
+import { blockAt } from "./wx.grid";
 
 /**
  * The fuel cells on the map. One Parquet file per A5 resolution (scripts/levels.py), sorted by cell ID; the view
@@ -48,10 +50,29 @@ type Group = {
   batch: RecordBatch;
   poly: unknown;
   color: unknown;
+  /** the fuel colors as read, and the same Arrow column, kept for when the weather is off */
+  rgba: Uint8Array;
+  plain: unknown;
+  /** each cell's place on the weather grid (column, row), the weather blocks they fall in, and the weather state the colors were last made for */
+  wx: Float32Array;
+  blocks: number[];
+  painted: number;
   tris: Uint32Array;
   seen: number;
 };
 type Want = { res: number; rgs: number[] };
+
+/** The weather blocks a set of cells falls in (each cell and the pixels around it, for the blend between pixels). */
+function blocksOf(wx: Float32Array) {
+  const out = new Set<number>();
+  for (let i = 0; i < wx.length; i += 2) {
+    const c = wx[i]!, r = wx[i + 1]!;
+    if (c !== c) continue;
+    out.add(blockAt(c, r));
+    out.add(blockAt(c + 1, r + 1));
+  }
+  return [...out];
+}
 
 export function createCells(onChange: () => void, onError: (m: string) => void) {
   const worker = new CellsWorker();
@@ -81,7 +102,7 @@ export function createCells(onChange: () => void, onError: (m: string) => void) 
       }
       if (pendingView) view(pendingView.zoom, pendingView.bbox);
     } else if (d.type === "group") {
-      groups.set(key(d.res, d.rg), { res: d.res, rg: d.rg, cells: d.cells, vol: d.vol, n: d.n, tris: d.tris, ...polygonBatch(d.coords, d.rings), color: colorData(d.colors), seen: tick });
+      groups.set(key(d.res, d.rg), { res: d.res, rg: d.rg, cells: d.cells, vol: d.vol, n: d.n, tris: d.tris, ...polygonBatch(d.coords, d.rings), ...((plain) => ({ color: plain, plain }))(colorData(d.colors)), rgba: d.colors, wx: d.wx, blocks: blocksOf(d.wx), painted: -1, seen: tick });
       trim();
       onChange();
     } else {
@@ -194,6 +215,40 @@ export function createCells(onChange: () => void, onError: (m: string) => void) 
         }
       }
       return null;
+    },
+    /** The weather blocks the cells of the view fall in. */
+    blocks() {
+      const out = new Set<number>();
+      for (const rg of want.rgs) for (const b of groups.get(key(want.res, rg))?.blocks ?? []) out.add(b);
+      return [...out];
+    },
+    /**
+     * Color the cells on screen by the weather: a primed cell keeps its fuel color, the rest go gray (the color's own
+     * lightness, so the fuel pattern still reads). null: the plain fuel map.
+     */
+    paint(wx: Weather | null) {
+      const state = wx && wx.st.on ? wx.rev : -1;
+      for (const w of [back, want]) {
+        for (const rg of w.rgs) {
+          const g = groups.get(key(w.res, rg));
+          if (!g || g.painted === state) continue;
+          g.painted = state;
+          if (state < 0) {
+            g.color = g.plain;
+            continue;
+          }
+          const out = new Uint8Array(g.rgba.length);
+          for (let i = 0, o = 0; o < out.length; i++, o += 4) {
+            const r = g.rgba[o]!, gr = g.rgba[o + 1]!, b = g.rgba[o + 2]!;
+            const lit = wx!.lit(g.wx[2 * i]!, g.wx[2 * i + 1]!), gray = 0.2126 * r + 0.7152 * gr + 0.0722 * b;
+            out[o] = gray + (r - gray) * lit;
+            out[o + 1] = gray + (gr - gray) * lit;
+            out[o + 2] = gray + (b - gray) * lit;
+            out[o + 3] = 255;
+          }
+          g.color = colorData(out);
+        }
+      }
     },
     /** The layers to draw: the last whole view underneath while the new one is still coming in, then the new one. */
     layers(beforeId: string | undefined) {

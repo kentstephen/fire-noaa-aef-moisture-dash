@@ -53,6 +53,8 @@ export default defineConfig({
   base: "./",
   plugins: [parquetRanges()],
   worker: { format: "es" },
+  // imported only inside workers, where the dev server does not find them on its own
+  optimizeDeps: { include: ["icechunk-js", "zarrita", "numcodecs", "a5-js", "apache-arrow"] },
   build: { target: "es2022" },
   server: { port: 5376, strictPort: true },
 });

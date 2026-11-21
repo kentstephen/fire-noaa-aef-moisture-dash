@@ -2,6 +2,7 @@ import { cellToBoundary, cellToLonLat, lonLatToCell } from "a5-js";
 import { Zstd } from "numcodecs";
 
 import { fan } from "./geo.fan";
+import { hrrrXY } from "./wx.grid";
 
 /**
  * Cells finer than the baked ones, made here from the 10 m AlphaEarth embeddings: one 256 px chunk of the mosaic is
@@ -17,7 +18,7 @@ export type Head = { n_in: number; hidden: number; n_out: number; vol_lo: number
 export type FineAsk = { type: "init"; head: Head; root: string; t: number } | { type: "read"; id: number; cy: number; cx: number; res: number };
 export type FineAnswer =
   | { type: "ready"; probeGap: number }
-  | { type: "chunk"; id: number; cells: BigUint64Array; sum: Float32Array; n: Uint16Array; own: Int32Array; coords: Float64Array; rings: Int32Array; tris: Uint32Array }
+  | { type: "chunk"; id: number; cells: BigUint64Array; sum: Float32Array; n: Uint16Array; own: Int32Array; wx: Float32Array; coords: Float64Array; rings: Int32Array; tris: Uint32Array }
   | { type: "error"; id: number; message: string };
 
 /** The mosaic's grid (EPSG:4326) and its chunks (aef-biomass aef.ts). */
@@ -112,7 +113,7 @@ function probeGap(): number {
 async function read(id: number, cy: number, cx: number, res: number) {
   const e = await embeddings(cy, cx);
   if (!e) {
-    post({ type: "chunk", id, cells: new BigUint64Array(0), sum: new Float32Array(0), n: new Uint16Array(0), own: new Int32Array(0), coords: new Float64Array(0), rings: new Int32Array(1), tris: new Uint32Array(0) });
+    post({ type: "chunk", id, cells: new BigUint64Array(0), sum: new Float32Array(0), n: new Uint16Array(0), own: new Int32Array(0), wx: new Float32Array(0), coords: new Float64Array(0), rings: new Int32Array(1), tris: new Uint32Array(0) });
     return;
   }
   const vol = volume(e, N);
@@ -145,6 +146,7 @@ async function read(id: number, cy: number, cx: number, res: number) {
   // the cells this chunk draws: the ones whose centers are inside it
   const w = X0 + cx * CHUNK * RES, east = w + CHUNK * RES, north = Y0 - cy * CHUNK * RES, south = north - CHUNK * RES;
   const own: number[] = [];
+  let wx = new Float32Array(count * 2);
   let coords = new Float64Array(count * 12), tris = new Uint32Array(count * 9);
   const rings: number[] = [0];
   let p = 0, q = 0;
@@ -165,10 +167,11 @@ async function read(id: number, cy: number, cx: number, res: number) {
     q = fan(ring, coords, p, tris, q);
     p += ring.length;
     rings.push(p);
+    hrrrXY(ctr[0], ctr[1], wx, 2 * own.length);
     own.push(i);
   }
-  const out = { cells, sum, n, own: Int32Array.from(own), coords: coords.slice(0, p * 2), rings: Int32Array.from(rings), tris: tris.slice(0, q) };
-  post({ type: "chunk", id, ...out }, [out.cells.buffer, out.sum.buffer, out.n.buffer, out.own.buffer, out.coords.buffer, out.rings.buffer, out.tris.buffer]);
+  const out = { cells, sum, n, own: Int32Array.from(own), wx: wx.slice(0, 2 * own.length), coords: coords.slice(0, p * 2), rings: Int32Array.from(rings), tris: tris.slice(0, q) };
+  post({ type: "chunk", id, ...out }, [out.cells.buffer, out.sum.buffer, out.n.buffer, out.own.buffer, out.wx.buffer, out.coords.buffer, out.rings.buffer, out.tris.buffer]);
 }
 
 self.onmessage = (ev: MessageEvent<FineAsk>) => {

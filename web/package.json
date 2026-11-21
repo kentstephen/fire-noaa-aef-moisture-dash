@@ -1,0 +1,22 @@
+{
+  "name": "fire-fuel-a5-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4"
+  },
+  "dependencies": {
+    "a5-js": "^1.0.0",
+    "icechunk-js": "^0.7.1",
+    "maplibre-gl": "^6.19.0",
+    "proj4": "^2.22.0",
+    "zarrita": "^0.7.6"
+  }
+}

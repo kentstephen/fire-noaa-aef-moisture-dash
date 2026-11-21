@@ -97,8 +97,8 @@ function draw() {
 
 const km = (m: number) => (m >= 1000 ? `${(m / 1000).toFixed(m >= 10_000 ? 0 : 1)} km` : m >= 100 ? `${Math.round(m / 10) * 10} m` : `${Math.round(m)} m`);
 function status() {
-  const p = cells.progress(), f = fine.progress();
-  const loading = !p.ready || !p.done || !f.done;
+  const p = cells.progress(), f = fine.progress(), g = ground.status();
+  const loading = !p.ready || !p.done || !f.done || g.reading.length > 0;
   const got = p.got + f.got, total = p.total + f.total;
   bar.classList.toggle("on", loading);
   (bar.firstElementChild as HTMLElement).style.width = `${total ? (100 * got) / total : 0}%`;
@@ -107,18 +107,19 @@ function status() {
     ? "Opening the Parquet files"
     : !p.done
       ? `Reading cells<span>${p.got} of ${p.total} row groups</span>`
-      : `Reading the 10 m embeddings<span>${f.got} of ${f.total} chunks</span>`;
+      : !f.done
+        ? `Reading the 10 m embeddings<span>${f.got} of ${f.total} chunks</span>`
+        : `Reading ${g.reading.join(", ")}<span>Overture Maps</span>`;
   $(".zoom").textContent = fine.active
     ? `Cells about ${km(cellM(fine.res))} across (A5 resolution ${fine.res}), made here from the 10 m embeddings`
     : cells.res
       ? `Cells about ${km(cellM(cells.res))} across (A5 resolution ${cells.res})`
       : "";
-  const g = ground.status();
   $(".ground").textContent = !ground.active
     ? ""
     : g.reading.length
       ? `Reading ${g.reading.join(", ")} from Overture Maps`
-      : `Roads thin, power lines bold, buildings from zoom 14 (Overture Maps)${g.notes.length ? `; ${g.notes.join("; ")}` : ""}`;
+      : `Roads thin, power lines bold, building outlines from zoom 14 (Overture Maps)${g.notes.length ? `; ${g.notes.join("; ")}` : ""}`;
   $(".status:not(.ground)").textContent = note;
 }
 

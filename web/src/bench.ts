@@ -47,6 +47,8 @@ async function main() {
   t = performance.now();
   const db = new duckdb.AsyncDuckDB(new duckdb.VoidLogger(), new Worker(ehWorker));
   await db.instantiate(ehWasm);
+  // byte ranges only: as it comes, this build downloads every remote file whole
+  await db.open({ path: ":memory:", filesystem: { forceFullHTTPReads: false, reliableHeadRequests: true, allowFullHTTPReads: false } });
   const con = await db.connect();
   note("haybarn start ms", ms(t));
   t = performance.now();
@@ -74,7 +76,7 @@ async function main() {
     files.set(type, { urls, boxes: (col.extent.spatial.bbox as number[][]).slice(1) });
     note(`overture ${type} catalog`, { ms: ms(t), files: urls.length, boxes: col.extent.spatial.bbox.length - 1 });
   }
-  for (const [name, w, s, e, n] of [["view", -120.77, 38.86, -120.63, 38.94], ["next view", -120.63, 38.86, -120.49, 38.94]] as const) {
+  for (const [name, w, s, e, n] of [["Berkeley", -122.31, 37.84, -122.23, 37.9], ["Georgetown", -120.77, 38.86, -120.63, 38.94], ["next to Georgetown", -120.63, 38.86, -120.49, 38.94]] as const) {
     for (const [, type] of themes) {
       const f = files.get(type)!;
       const hit = f.urls.filter((_, i) => f.boxes[i] && f.boxes[i]![0]! < e && f.boxes[i]![2]! > w && f.boxes[i]![1]! < n && f.boxes[i]![3]! > s);

@@ -1,13 +1,11 @@
-import earcut from "earcut";
-
 /**
  * Overture geometries (WKB, as DuckDB hands them back) turned into flat arrays for the GeoArrow layers, off the main
- * thread: lines as coordinates and the first point of each line; polygons as their outer rings (holes are left
- * filled: this is context, not measurement) with the triangles already cut.
+ * thread: coordinates and the first point of each line. Lines are taken as they are; polygons give their rings as
+ * closed lines (buildings are drawn as outlines, not filled).
  */
 
-export type GeomAsk = { id: number; kind: "lines" | "polygons"; values: Uint8Array; offsets: Int32Array };
-export type GeomAnswer = { id: number; coords: Float64Array; starts: Int32Array; tris: Uint32Array };
+export type GeomAsk = { id: number; kind: "lines" | "outlines"; values: Uint8Array; offsets: Int32Array };
+export type GeomAnswer = { id: number; coords: Float64Array; starts: Int32Array };
 
 class Grow {
   a = new Float64Array(1 << 16);
@@ -27,7 +25,6 @@ function parse(d: GeomAsk): GeomAnswer {
   const view = new DataView(d.values.buffer, d.values.byteOffset, d.values.byteLength);
   const coords = new Grow();
   const starts: number[] = [0];
-  const tris: number[] = [];
   let p = 0;
   /** One ring or line: its points appended to coords; returns how many. */
   const points = (le: boolean, dims: number, keep: boolean) => {
@@ -54,16 +51,10 @@ function parse(d: GeomAsk): GeomAnswer {
       const rings = view.getUint32(p, le);
       p += 4;
       for (let r = 0; r < rings; r++) {
-        const keep = d.kind === "polygons" && r === 0;
-        const first = coords.n / 2;
+        const keep = d.kind === "outlines";
         const n = points(le, dims, keep);
-        if (!keep) continue;
-        if (n < 4) {
-          coords.n -= 2 * n;
-          continue;
-        }
-        for (const t of earcut(coords.a.subarray(2 * first, coords.n))) tris.push(first + t);
-        starts.push(coords.n / 2);
+        if (keep && n > 2) starts.push(coords.n / 2);
+        else if (keep) coords.n -= 2 * n;
       }
     } else {
       // multi-geometries and collections: each part is a whole geometry
@@ -76,10 +67,10 @@ function parse(d: GeomAsk): GeomAnswer {
     p = d.offsets[i]!;
     if (d.offsets[i + 1]! > p) geometry();
   }
-  return { id: d.id, coords: coords.a.slice(0, coords.n), starts: Int32Array.from(starts), tris: Uint32Array.from(tris) };
+  return { id: d.id, coords: coords.a.slice(0, coords.n), starts: Int32Array.from(starts) };
 }
 
 self.onmessage = (ev: MessageEvent<GeomAsk>) => {
   const r = parse(ev.data);
-  (self as unknown as Worker).postMessage(r, [r.coords.buffer, r.starts.buffer, r.tris.buffer]);
+  (self as unknown as Worker).postMessage(r, [r.coords.buffer, r.starts.buffer]);
 };

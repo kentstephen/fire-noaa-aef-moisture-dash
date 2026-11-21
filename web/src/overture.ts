@@ -1,12 +1,12 @@
 import type { RecordBatch } from "apache-arrow";
 
-import { cellLayer, lineBatch, lineLayer, polygonBatch } from "./geo";
+import { lineBatch, lineLayer } from "./geo";
 import type { GeomAnswer, GeomAsk } from "./overture.worker";
 import GeomWorker from "./overture.worker.ts?worker";
 
 /**
  * What is on the ground, as context when zoomed in to where the embeddings are read: Overture Maps' roads, power
- * lines and buildings, in one neutral color each, not colored by the fuel. Read in the browser with DuckDB
+ * lines and building outlines, in one neutral color each, not colored by the fuel. Read in the browser with DuckDB
  * (Haybarn-Wasm) straight from Overture's GeoParquet on S3: Overture's catalog names each file's bounding box, so
  * only the file or two under the view is opened, and DuckDB's row group statistics find the rows.
  *
@@ -25,18 +25,25 @@ const MAX_ROWS = 250_000;
 
 type Box = [number, number, number, number];
 type Kind = "roads" | "power" | "buildings";
-const SOURCES: Record<Kind, { theme: string; type: string; where: string; geom: "lines" | "polygons" }> = {
+const SOURCES: Record<Kind, { theme: string; type: string; where: string; geom: "lines" | "outlines" }> = {
   roads: { theme: "transportation", type: "segment", where: "subtype = 'road'", geom: "lines" },
   power: { theme: "base", type: "infrastructure", where: "class IN ('power_line', 'minor_line')", geom: "lines" },
-  buildings: { theme: "buildings", type: "building", where: "true", geom: "polygons" },
+  buildings: { theme: "buildings", type: "building", where: "true", geom: "outlines" },
 };
-type Drawn = { box: Box; rows: number; batch: RecordBatch; shape: unknown; tris: Uint32Array } | null;
+type Drawn = { box: Box; rows: number; batch: RecordBatch; line: unknown } | null;
 type Query = (sql: string) => Promise<{ numRows: number; getChild(name: string): { data: { values: Uint8Array; valueOffsets: Int32Array; length: number; offset: number }[] } | null }>;
 
 const inside = (a: Box, b: Box) => a[0] >= b[0] && a[1] >= b[1] && a[2] <= b[2] && a[3] <= b[3];
 
 export function createOverture(onChange: () => void, onError: (m: string) => void) {
-  let starting: Promise<{ query: Query; files: Record<Kind, { urls: string[]; boxes: number[][] }> }> | null = null;
+  let starting: Promise<{ query: Query; files: Record<Kind, { urls: string[]; boxes: number[][] }>; stop: () => void }> | null = null;
+  /** One query at a time: DuckDB in WebAssembly runs out of memory when several large reads overlap. */
+  let line: Promise<unknown> = Promise.resolve();
+  const inTurn = <T>(fn: () => Promise<T>): Promise<T> => {
+    const p = line.then(fn, fn);
+    line = p.catch(() => {});
+    return p;
+  };
   const worker = new GeomWorker();
   const waiting = new Map<number, (a: GeomAnswer) => void>();
   worker.onmessage = (ev: MessageEvent<GeomAnswer>) => {
@@ -54,6 +61,7 @@ export function createOverture(onChange: () => void, onError: (m: string) => voi
   const drawn: Record<Kind, Drawn> = { roads: null, power: null, buildings: null };
   const busy: Record<Kind, boolean> = { roads: false, power: false, buildings: false };
   const note: Record<Kind, string> = { roads: "", power: "", buildings: "" };
+  const gaveUp: Record<Kind, string> = { roads: "", power: "", buildings: "" };
   let view: { zoom: number; box: Box } | null = null;
   let active = false;
 
@@ -64,8 +72,11 @@ export function createOverture(onChange: () => void, onError: (m: string) => voi
         import("@haybarn/haybarn-wasm/dist/duckdb-browser-eh.worker.js?url"),
         import("@haybarn/haybarn-wasm/dist/duckdb-eh.wasm?url"),
       ]);
-      const db = new duckdb.AsyncDuckDB(new duckdb.VoidLogger(), new Worker(workerUrl));
+      const engine = new Worker(workerUrl);
+      const db = new duckdb.AsyncDuckDB(new duckdb.VoidLogger(), engine);
       await db.instantiate(wasmUrl);
+      // byte ranges only: as it comes, this build downloads every remote file whole (Overture's are 700 to 800 MB each)
+      await db.open({ path: ":memory:", filesystem: { forceFullHTTPReads: false, reliableHeadRequests: true, allowFullHTTPReads: false } });
       const con = await db.connect();
       const release = (await (await fetch(`${STAC}/catalog.json`)).json()).latest as string;
       const files = {} as Record<Kind, { urls: string[]; boxes: number[][] }>;
@@ -83,7 +94,7 @@ export function createOverture(onChange: () => void, onError: (m: string) => voi
           files[k] = { urls, boxes };
         }),
       );
-      return { query: (sql: string) => con.query(sql) as unknown as ReturnType<Query>, files };
+      return { query: (sql: string) => inTurn(() => con.query(sql) as unknown as ReturnType<Query>), files, stop: () => engine.terminate() };
     })();
     starting.catch((e) => {
       starting = null;
@@ -108,7 +119,7 @@ export function createOverture(onChange: () => void, onError: (m: string) => voi
       const f = files[kind];
       const urls = f.urls.filter((_, i) => f.boxes[i]![0]! < e && f.boxes[i]![2]! > w && f.boxes[i]![1]! < n && f.boxes[i]![3]! > s);
       const src = SOURCES[kind];
-      let coords: Float64Array = new Float64Array(0), starts: Int32Array = new Int32Array([0]), tris: Uint32Array = new Uint32Array(0), rows = 0;
+      let coords: Float64Array = new Float64Array(0), starts: Int32Array = new Int32Array([0]), rows = 0;
       if (urls.length) {
         const t = await query(`SELECT geometry FROM read_parquet([${urls.map((u) => `'${u}'`).join(", ")}])
           WHERE bbox.xmin < ${e} AND bbox.xmax > ${w} AND bbox.ymin < ${n} AND bbox.ymax > ${s} AND ${src.where} LIMIT ${MAX_ROWS + 1}`);
@@ -126,23 +137,24 @@ export function createOverture(onChange: () => void, onError: (m: string) => voi
           at += d.valueOffsets[d.offset + d.length]! - a;
         }
         offsets[rows] = at;
-        ({ coords, starts, tris } = await shapes({ kind: src.geom, values, offsets }));
+        ({ coords, starts } = await shapes({ kind: src.geom, values, offsets }));
       }
       note[kind] = rows > MAX_ROWS ? `more than ${MAX_ROWS.toLocaleString("en-US")} ${kind} here, not all drawn` : "";
-      if (src.geom === "lines") {
-        const { batch, line } = lineBatch(coords, starts);
-        drawn[kind] = { box, rows, batch, shape: line, tris };
-      } else {
-        const { batch, poly } = polygonBatch(coords, starts);
-        drawn[kind] = { box, rows, batch, shape: poly, tris };
-      }
+      drawn[kind] = { box, rows, ...lineBatch(coords, starts) };
     } catch (e) {
-      onError(`Overture ${kind}: ${(e as Error)?.message ?? e}`);
+      const m = String((e as Error)?.message ?? e);
+      onError(`Overture ${kind}: ${m}`);
+      // a WebAssembly fault leaves the engine unusable: drop it, the next read starts a new one
+      if (/memory|unreachable|RuntimeError|out of bounds/i.test(m)) {
+        void starting?.then((s) => s.stop()).catch(() => {});
+        starting = null;
+      }
+      gaveUp[kind] = view ? view.box.join() : "";
     }
     busy[kind] = false;
     onChange();
-    // the view may have moved on while this was read
-    if (view && active) void read(kind);
+    // the view may have moved on while this was read (a view that just failed is not tried again until it moves)
+    if (view && active && gaveUp[kind] !== view.box.join()) void read(kind);
   }
 
   return {
@@ -166,9 +178,9 @@ export function createOverture(onChange: () => void, onError: (m: string) => voi
       if (!active || !view) return [];
       const out = [];
       const b = drawn.buildings, r = drawn.roads, p = drawn.power;
-      if (b && b.rows && view.zoom >= BUILDING_ZOOM) out.push(cellLayer("overture-buildings", { batch: b.batch, poly: b.shape, color: [240, 242, 244, 150], tris: b.tris }, beforeId));
-      if (r && r.rows) out.push(lineLayer("overture-roads", { batch: r.batch, line: r.shape }, [240, 242, 244, 130], 1, beforeId));
-      if (p && p.rows) out.push(lineLayer("overture-power", { batch: p.batch, line: p.shape }, [255, 255, 255, 235], 2.5, beforeId));
+      if (b && b.rows && view.zoom >= BUILDING_ZOOM) out.push(lineLayer("overture-buildings", b, [240, 242, 244, 200], 1, beforeId));
+      if (r && r.rows) out.push(lineLayer("overture-roads", r, [240, 242, 244, 130], 1, beforeId));
+      if (p && p.rows) out.push(lineLayer("overture-power", p, [255, 255, 255, 235], 2.5, beforeId));
       return out;
     },
   };

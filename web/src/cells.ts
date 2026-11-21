@@ -38,8 +38,6 @@ export function resFor(zoom: number, now = 0) {
   const lo = plainRes(zoom - HOLD), hi = plainRes(zoom + HOLD);
   return now >= lo && now <= hi ? now : plainRes(zoom);
 }
-/** A coarse level kept whole and drawn under everything, so ground not read yet is coarse, never empty. */
-const BASE_RES = 11;
 
 type Group = {
   res: number;
@@ -82,7 +80,6 @@ export function createCells(onChange: () => void, onError: (m: string) => void) 
         index.set(r, { lo: BigUint64Array.from(at, (i) => d.lo[i]!), hi: BigUint64Array.from(at, (i) => d.hi[i]!) });
       }
       if (pendingView) view(pendingView.zoom, pendingView.bbox);
-      else ask({ type: "want", jobs: base().map((rg) => ({ res: BASE_RES, rg })) });
     } else if (d.type === "group") {
       groups.set(key(d.res, d.rg), { res: d.res, rg: d.rg, cells: d.cells, vol: d.vol, n: d.n, tris: d.tris, ...polygonBatch(d.coords, d.rings), color: colorData(d.colors), seen: tick });
       trim();
@@ -94,11 +91,9 @@ export function createCells(onChange: () => void, onError: (m: string) => void) 
     }
   };
 
-  const base = () => [...(index.get(BASE_RES)?.lo.keys() ?? [])];
-
   function trim() {
     if (groups.size <= MAX_GROUPS) return;
-    const keep = new Set([...want.rgs.map((rg) => key(want.res, rg)), ...back.rgs.map((rg) => key(back.res, rg)), ...base().map((rg) => key(BASE_RES, rg))]);
+    const keep = new Set([...want.rgs.map((rg) => key(want.res, rg)), ...back.rgs.map((rg) => key(back.res, rg))]);
     const old = [...groups].filter(([k]) => !keep.has(k)).sort((a, b) => a[1].seen - b[1].seen);
     for (const [k] of old) {
       if (groups.size <= MAX_GROUPS) break;
@@ -167,7 +162,7 @@ export function createCells(onChange: () => void, onError: (m: string) => void) 
     }
     if (whole(want)) back = { res: 0, rgs: [] };
     const todo = (r: number, list: number[]) => list.filter((rg) => !groups.has(key(r, rg)) && !failed.has(key(r, rg))).map((rg) => ({ res: r, rg }));
-    ask({ type: "want", jobs: [...todo(BASE_RES, base()), ...todo(res, rgs)] });
+    ask({ type: "want", jobs: todo(res, rgs) });
     onChange();
   }
 
@@ -204,8 +199,8 @@ export function createCells(onChange: () => void, onError: (m: string) => void) 
     layers(beforeId: string | undefined) {
       if (whole(want) && back.res) back = { res: 0, rgs: [] };
       const out = [];
-      const under: Want[] = want.res > BASE_RES ? [{ res: BASE_RES, rgs: base() }] : [];
-      if (back.res && back.res !== want.res && back.res !== BASE_RES) under.push(back);
+      const under: Want[] = [];
+      if (back.res && back.res !== want.res) under.push(back);
       for (const w of [...under, want]) {
         for (const rg of w.rgs) {
           const g = groups.get(key(w.res, rg));

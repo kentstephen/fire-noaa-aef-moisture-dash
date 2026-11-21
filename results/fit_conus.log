@@ -1,0 +1,95 @@
+4103 windows with pixels
+24,618,000 rows  California 4,368,000  West 7,068,000  Central 7,002,000  East 6,180,000  rss 16.2 GB
+  fold 0 done  2.2 min  rss 18.9 GB
+  fold 1 done  3.9 min  rss 18.8 GB
+  fold 2 done  5.6 min  rss 19.5 GB
+  fold 3 done  7.3 min  rss 18.2 GB
+  fold 4 done  9.0 min  rss 18.2 GB
+{
+ "rows": 24618000,
+ "national head, held out": {
+  "all": {
+   "rows": 24618000,
+   "vol_r2": 0.814,
+   "vol_ratio_err": 1.48,
+   "life_acc": 0.844,
+   "vol_mean_landfire": 3.51,
+   "vol_mean_head": 2.84
+  },
+  "California": {
+   "rows": 4368000,
+   "vol_r2": 0.79,
+   "vol_ratio_err": 1.61,
+   "life_acc": 0.803,
+   "vol_mean_landfire": 3.44,
+   "vol_mean_head": 2.63
+  },
+  "West": {
+   "rows": 7068000,
+   "vol_r2": 0.824,
+   "vol_ratio_err": 1.48,
+   "life_acc": 0.82,
+   "vol_mean_landfire": 2.07,
+   "vol_mean_head": 1.82
+  },
+  "Central": {
+   "rows": 7002000,
+   "vol_r2": 0.821,
+   "vol_ratio_err": 1.4,
+   "life_acc": 0.867,
+   "vol_mean_landfire": 2.13,
+   "vol_mean_head": 1.65
+  },
+  "East": {
+   "rows": 6180000,
+   "vol_r2": 0.783,
+   "vol_ratio_err": 1.49,
+   "life_acc": 0.874,
+   "vol_mean_landfire": 6.72,
+   "vol_mean_head": 5.48
+  }
+ },
+ "California head": {
+  "all": {
+   "rows": 24618000,
+   "vol_r2": 0.548,
+   "vol_ratio_err": 2.37,
+   "life_acc": 0.702,
+   "vol_mean_landfire": 3.51,
+   "vol_mean_head": 1.31
+  },
+  "California": {
+   "rows": 4368000,
+   "vol_r2": 0.807,
+   "vol_ratio_err": 1.56,
+   "life_acc": 0.836,
+   "vol_mean_landfire": 3.44,
+   "vol_mean_head": 2.72
+  },
+  "West": {
+   "rows": 7068000,
+   "vol_r2": 0.734,
+   "vol_ratio_err": 1.78,
+   "life_acc": 0.743,
+   "vol_mean_landfire": 2.07,
+   "vol_mean_head": 1.29
+  },
+  "Central": {
+   "rows": 7002000,
+   "vol_r2": 0.395,
+   "vol_ratio_err": 2.89,
+   "life_acc": 0.667,
+   "vol_mean_landfire": 2.13,
+   "vol_mean_head": 0.42
+  },
+  "East": {
+   "rows": 6180000,
+   "vol_r2": 0.359,
+   "vol_ratio_err": 5.59,
+   "life_acc": 0.604,
+   "vol_mean_landfire": 6.72,
+   "vol_mean_head": 1.38
+  }
+ }
+}
+wrote models/fuel_volume_conus.json  11.2 min  peak about 18.7 GB

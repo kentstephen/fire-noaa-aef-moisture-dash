@@ -4,12 +4,11 @@ import type { RecordBatch } from "apache-arrow";
 import type { FineAnswer, FineAsk, Head } from "./fine.worker";
 import FineWorker from "./fine.worker.ts?worker";
 import { cellLayer, colorData, polygonBatch } from "./geo";
-import { rampInto, volT } from "./ramp";
-import type { Weather } from "./wx";
+import { volT } from "./ramp";
 
 /**
  * Zoomed in past the baked cells: the real 10 m embeddings of the view are read and scored in the browser
- * (fine.worker.ts) and drawn as finer A5 cells over the baked ones, on the same ramp. Nothing is kept on disk.
+ * (fine.worker.ts) and drawn as finer A5 cells over the fuel tiles, shaded the same way. Nothing is kept on disk.
  */
 
 /** From this zoom the embeddings are read: a full window is about 50 to 120 chunks of 2.6 MB. */
@@ -34,15 +33,11 @@ type Chunk = {
   sum: Float32Array;
   n: Uint16Array;
   own: Int32Array;
-  /** each drawn cell's place on the weather grid (column, row) */
-  wx: Float32Array;
   tris: Uint32Array;
   batch: RecordBatch;
   poly: unknown;
   color: unknown;
   seen: number;
-  /** the weather state its colors were last made for */
-  painted: number;
 };
 
 export function createFine(onChange: () => void, onError: (m: string) => void) {
@@ -59,8 +54,6 @@ export function createFine(onChange: () => void, onError: (m: string) => void) {
     return t;
   };
   let res = 18;
-  let weather: Weather | null = null;
-  const wxState = () => (weather && weather.st.on ? weather.rev : -1);
   let queue: string[] = [];
   let want: string[] = [];
   let active = false;
@@ -78,16 +71,11 @@ export function createFine(onChange: () => void, onError: (m: string) => void) {
     const totals = totalsOf(parts(k)[0]);
     for (let i = 0; i < c.own.length; i++) {
       const t = totals.get(c.cells[c.own[i]!]!)!;
-      const o = 4 * i;
-      rampInto(rgba, o, volT(t.s / t.n));
-      // not primed: gray, the color's own lightness
-      if (weather && weather.st.on) {
-        const lit = weather.lit(c.wx[2 * i]!, c.wx[2 * i + 1]!), gray = 0.2126 * rgba[o]! + 0.7152 * rgba[o + 1]! + 0.0722 * rgba[o + 2]!;
-        for (let k = 0; k < 3; k++) rgba[o + k] = gray + (rgba[o + k]! - gray) * lit;
-      }
+      // the fuel on the ramp's scale, in the red byte: the shader makes the color (geo.ts, risk.ts)
+      rgba[4 * i] = Math.round(255 * volT(t.s / t.n));
+      rgba[4 * i + 3] = 255;
     }
     c.color = colorData(rgba);
-    c.painted = wxState();
   }
 
   function drop(k: string) {
@@ -114,7 +102,7 @@ export function createFine(onChange: () => void, onError: (m: string) => void) {
         t.n += d.n[i]!;
       } else totals.set(d.cells[i]!, { s: d.sum[i]!, n: d.n[i]! });
     }
-    chunks.set(k, { cells: d.cells, sum: d.sum, n: d.n, own: d.own, wx: d.wx, tris: d.tris, ...polygonBatch(d.coords, d.rings), color: null, seen: tick, painted: -2 });
+    chunks.set(k, { cells: d.cells, sum: d.sum, n: d.n, own: d.own, tris: d.tris, ...polygonBatch(d.coords, d.rings), color: null, seen: tick });
     // the cells on its edges now have their other part: this chunk and the eight around it take their colors again
     for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) recolor(key(r, cy + dy, cx + dx));
     if (chunks.size > MAX_CHUNKS) {
@@ -215,12 +203,6 @@ export function createFine(onChange: () => void, onError: (m: string) => void) {
       if (!active) return null;
       const t = totalsOf(res).get(lonLatToCell([lon, lat] as never, res));
       return t ? { vol: t.s / t.n, n: t.n, res } : null;
-    },
-    /** Color the cells by the weather (primed keeps its color, the rest gray); null for the plain fuel map. */
-    paint(wx: Weather | null) {
-      weather = wx;
-      const state = wxState();
-      for (const [k, c] of chunks) if (c.painted !== state && c.color) recolor(k);
     },
     layers(beforeId: string | undefined) {
       if (!active) return [];

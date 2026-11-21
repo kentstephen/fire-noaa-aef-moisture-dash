@@ -6,20 +6,27 @@ import { BLOCK, blockRowCol, HRRR } from "./wx.grid";
 /**
  * Fosberg that builds up and lets go, from the HRRR analysis (dynamical.org, hourly, 3 km), one block at a time.
  *
- * Fosberg's index reads the moisture dead fuel would have if it matched the air at once. Here the moisture follows
- * the air with a time lag instead (the 10 and 100 hour fuel classes of the US fire danger system):
- *     m(t) = target(t) + (m(t-1) - target(t)) * exp(-1 / lag)
+ * Fosberg's index reads the moisture dead fuel would have if it matched the air at once, so it swings from day to
+ * night. Here the moisture follows the air with a time lag instead (the 100 hour fuel class of the US fire danger
+ * system):
+ *     m(t) = target(t) + (m(t-1) - target(t)) * exp(-1 / LAG)
  * target is the air's equilibrium moisture (from 2 m temperature and humidity), or 30 %, the top of Fosberg's
- * scale, in an hour with rain. Wind is the mean of the last 24 hours, so the afternoon peak does not pulse. The
- * index is Fosberg's own formula on that moisture and that wind (scripts/weather.py is the same arithmetic).
+ * scale, in an hour with rain. Wind is the mean of the last WIND hours. The index is Fosberg's own formula on that
+ * moisture and that wind (scripts/weather.py is the same arithmetic). What is left of the daily swing is small;
+ * what shows is dry wind adding up over days and rain or damp air taking it back.
  *
  * The store's chunks hold 2,160 hours each; the newest one is read, and the one before it too when the newest is
- * younger than SPIN + 3 days. What goes back is the index once a day (00 UTC) per lag; the hourly fields are let go.
+ * younger than SPIN + 3 days. What goes back is the index every STEP hours as bytes (WX_SCALE steps per point of
+ * Fosberg, 0 where there is none); the hourly fields are let go.
  */
 
 const URL_ = "https://dynamical-noaa-hrrr.s3.us-west-2.amazonaws.com/noaa-hrrr-analysis/v0.2.0.icechunk";
 const VARS = ["temperature_2m", "relative_humidity_2m", "wind_u_10m", "wind_v_10m", "precipitation_surface"] as const;
-export const LAGS = [10, 100];
+/** Hours: the moisture lag, the span of the wind mean, and the time between the frames given back. */
+const LAG = 100;
+const WIND = 24;
+export const STEP = 6;
+const WX_SCALE = 3;
 /** Days at the start of what is read that are not shown: the moisture is still finding its level. */
 export const SPIN = 8;
 const CHUNK_T = 2160;
@@ -27,10 +34,10 @@ const RAIN_MM = 0.25;
 
 export type WxAsk = { type: "init" } | { type: "block"; id: number; block: number };
 export type WxAnswer =
-  /** days: the 00 UTC times (ms) the index is given for, oldest first */
-  | { type: "ready"; days: number[] }
-  /** fos: [day][lag][pixel in block] */
-  | { type: "block"; id: number; block: number; fos: Float32Array }
+  /** times: the times (ms) of the frames, oldest first */
+  | { type: "ready"; times: number[] }
+  /** fos: [frame][pixel in block], bytes */
+  | { type: "block"; id: number; block: number; fos: Uint8Array }
   | { type: "error"; id?: number; message: string };
 
 const post = (a: WxAnswer, transfer: Transferable[] = []) => (self as unknown as Worker).postMessage(a, transfer);
@@ -66,8 +73,8 @@ async function init() {
   // seconds since 1970 in the store, whatever its integer width
   hourMs = Float64Array.from(tv as ArrayLike<number>, (v) => Number(v) * 1000);
   dayAt = [];
-  for (let i = SPIN * 24; i < hourMs.length; i++) if (hourMs[i]! % 86_400_000 === 0) dayAt.push(i);
-  post({ type: "ready", days: dayAt.map((i) => hourMs[i]!) });
+  for (let i = SPIN * 24; i < hourMs.length; i++) if (hourMs[i]! % (STEP * 3_600_000) === 0) dayAt.push(i);
+  post({ type: "ready", times: dayAt.map((i) => hourMs[i]!) });
 }
 
 async function block(id: number, b: number) {
@@ -76,36 +83,34 @@ async function block(id: number, b: number) {
   const sel = [zarr.slice(t0, t1), zarr.slice(y0, y0 + h), zarr.slice(x0, x0 + w)];
   const [T, RH, U, V, P] = (await Promise.all(VARS.map((v) => zarr.get(arrays[v], sel)))).map((c) => c.data as Float32Array);
   const n = t1 - t0, px = h * w;
-  const m = LAGS.map(() => new Float32Array(px).fill(NaN));
-  const decay = LAGS.map((l) => Math.exp(-1 / l));
-  const hist = new Float32Array(24 * px), sum = new Float32Array(px), seen = new Uint8Array(px);
-  const fos = new Float32Array(dayAt.length * LAGS.length * BLOCK * BLOCK).fill(NaN);
+  const m = new Float32Array(px).fill(NaN);
+  const decay = Math.exp(-1 / LAG);
+  const hist = new Float32Array(WIND * px), sum = new Float32Array(px), seen = new Uint8Array(px);
+  const fos = new Uint8Array(dayAt.length * BLOCK * BLOCK);
   let d = 0;
   for (let i = 0; i < n; i++) {
-    const o = i * px, slot = (i % 24) * px;
+    const o = i * px, slot = (i % WIND) * px;
     for (let p = 0; p < px; p++) {
       const t = T![o + p]!, rh = RH![o + p]!;
       if (t === t && rh === rh) {
         const rain = P![o + p]! * 3600;
         const target = rain >= RAIN_MM ? 30 : emc(rh, t);
-        for (let k = 0; k < LAGS.length; k++) m[k]![p] = m[k]![p]! === m[k]![p]! ? target + (m[k]![p]! - target) * decay[k]! : target;
+        m[p] = m[p]! === m[p]! ? target + (m[p]! - target) * decay : target;
       }
       const u = U![o + p]!, v = V![o + p]!;
       if (u === u && v === v) {
         const mph = Math.hypot(u, v) * 2.2369363;
-        if (seen[p]! < 24) seen[p]!++;
+        if (seen[p]! < WIND) seen[p]!++;
         else sum[p]! -= hist[slot + p]!;
         hist[slot + p] = mph;
         sum[p]! += mph;
       }
     }
     if (d < dayAt.length && dayAt[d] === i) {
-      for (let k = 0; k < LAGS.length; k++) {
-        const at = (d * LAGS.length + k) * BLOCK * BLOCK;
-        for (let r = 0; r < h; r++) for (let c = 0; c < w; c++) {
-          const p = r * w + c;
-          if (seen[p]) fos[at + r * BLOCK + c] = fosberg(m[k]![p]!, sum[p]! / seen[p]!);
-        }
+      const at = d * BLOCK * BLOCK;
+      for (let r = 0; r < h; r++) for (let c = 0; c < w; c++) {
+        const p = r * w + c;
+        if (seen[p] && m[p]! === m[p]!) fos[at + r * BLOCK + c] = Math.min(255, Math.max(1, Math.round(fosberg(m[p]!, sum[p]! / seen[p]!) * WX_SCALE)));
       }
       d++;
     }

@@ -11,6 +11,18 @@ export const VIRIDIS_50 = [
   "#9dd93b", "#addc30", "#c0df25", "#d0e11c", "#dfe318", "#efe51c", "#fde725", "#feef54", "#fef784", "#ffffb3",
 ];
 
+/**
+ * Inferno (matplotlib) from 14 percent up, with three paler stops above its pale yellow (aef-landcover-fosberg-cog
+ * aef/ramp.ts): dark violet, crimson, orange, yellow; lightness rises the whole way. The risk is drawn on this one.
+ */
+export const INFERNO_50 = [
+  "#260c51", "#2f0a5b", "#380962", "#400a67", "#470b6a", "#4f0d6c", "#57106e", "#5f136e", "#67166e", "#6d186e",
+  "#751b6e", "#7d1e6d", "#85216b", "#8d2369", "#932667", "#9b2964", "#a32c61", "#ab2f5e", "#b1325a", "#b93556",
+  "#c03a51", "#c73e4c", "#ce4347", "#d34743", "#d94d3d", "#df5337", "#e45a31", "#e9612b", "#ec6726", "#f06f20",
+  "#f37819", "#f68013", "#f8870e", "#fa9008", "#fb9906", "#fca309", "#fcac11", "#fcb418", "#fbbe23", "#f9c72f",
+  "#f7d13d", "#f5db4c", "#f3e35a", "#f1ec6d", "#f2f482", "#f6fa96", "#fcffa4", "#fdffb0", "#fdffbc", "#feffc8",
+];
+
 export const cssGradient = (stops: string[]) => `linear-gradient(90deg, ${stops.join(", ")})`;
 
 /**

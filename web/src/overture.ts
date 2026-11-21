@@ -6,7 +6,8 @@ import GeomWorker from "./overture.worker.ts?worker";
 
 /**
  * What is on the ground, as context when zoomed in to where the embeddings are read: Overture Maps' roads, power
- * lines and building outlines, in one neutral color each, not colored by the fuel. Read in the browser with DuckDB
+ * lines and building outlines, not colored by the fuel: roads and buildings in white, power lines in a cyan that
+ * stands off both the white and the map's ramp. Read in the browser with DuckDB
  * (Haybarn-Wasm) straight from Overture's GeoParquet on S3: Overture's catalog names each file's bounding box, so
  * only the file or two under the view is opened, and DuckDB's row group statistics find the rows.
  *
@@ -180,7 +181,7 @@ export function createOverture(onChange: () => void, onError: (m: string) => voi
       const b = drawn.buildings, r = drawn.roads, p = drawn.power;
       if (b && b.rows && view.zoom >= BUILDING_ZOOM) out.push(lineLayer("overture-buildings", b, [240, 242, 244, 200], 1, beforeId));
       if (r && r.rows) out.push(lineLayer("overture-roads", r, [240, 242, 244, 130], 1, beforeId));
-      if (p && p.rows) out.push(lineLayer("overture-power", p, [255, 255, 255, 235], 2.5, beforeId));
+      if (p && p.rows) out.push(lineLayer("overture-power", p, [0, 255, 255, 245], 2.5, beforeId));
       return out;
     },
   };

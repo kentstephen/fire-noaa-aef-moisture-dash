@@ -92,10 +92,16 @@ button:focus-visible { outline: 2px solid var(--cool); outline-offset: 2px; }
 .wx { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
 .card.nowx .wxbody { display: none; }
 .dayrow { display: flex; align-items: center; gap: 6px; margin-top: 10px; }
-.dayrow .day { font-size: 20px; font-weight: 600; flex: 1; text-align: center; white-space: nowrap; }
+.dayrow .day { font-size: 15px; font-weight: 600; flex: 1; white-space: nowrap; }
+
+.tip .wxv { margin-top: 7px; }
 .step { background: none; border: 1px solid var(--line); color: var(--text); border-radius: 6px; width: 28px; height: 30px; font-size: 16px; cursor: pointer; padding: 0; }
 .step:hover { border-color: rgba(255, 255, 255, 0.4); }
 .wx input[type="range"] { flex: 1; min-width: 0; accent-color: var(--text); }
 .wx .linev { font-size: 12.5px; min-width: 22px; text-align: right; }
 .wxkey { display: flex; gap: 14px; font-size: 11.5px; color: var(--muted); margin-top: 8px; }
 .wxkey i { display: inline-block; width: 22px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+
+.seg-f.win { margin-top: 8px; }
+.tick { display: flex; gap: 7px; align-items: flex-start; margin-top: 10px; font-size: 12.5px; cursor: pointer; }
+.tick input { margin: 2px 0 0; accent-color: var(--text); }

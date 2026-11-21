@@ -1,142 +1,222 @@
-import { BLOCK, blockRowCol, HRRR } from "./wx.grid";
-import type { WxAnswer, WxAsk } from "./wx.worker";
-import WxWorker from "./wx.worker.ts?worker";
+import type { Device } from "@luma.gl/core";
+
+import { setWxTex } from "./risk";
+import type { FcAnswer, FcAsk } from "./wx.fc.worker";
+import { RUN_HOURS, SHARD, SLOW_STEP, TERM_HI, TERM_LO } from "./wx.fc.worker";
+import FcWorker from "./wx.fc.worker.ts?worker";
+import { HRRR, hrrrXY } from "./wx.grid";
 
 /**
- * The weather's say over the fuel map: whether the fuel in a place is primed. It is primed when Fosberg, built up
- * over days (wx.worker.ts), is at or over a line; the map shows primed cells in the ramp's color and the rest in
- * gray. Read from the HRRR analysis in the browser, only the blocks the cells on screen fall in.
+ * The weather on the map: the hour's fire weather score, and the same score built up over days, read in the browser
+ * from the HRRR forecast store (wx.fc.worker.ts), only the shards under the view. Each shard's runs arrive oldest
+ * first and are put into two textures (a layer per frame) that the map's shader reads at every screen pixel, so the
+ * picture fills forward in time as the data comes; nothing here colors anything. Frames a shard does not have yet
+ * hold its newest one.
  */
 
-/** The moisture lags offered (hours), and the blocks of pixels a side. */
-export const LAGS = [10, 100];
-const PER = BLOCK * BLOCK;
-const WORKERS = 3;
-/** Blocks in flight per worker (five variables each). */
-const LANES = 2;
+/** Runs in the chain, 48 hours each: one behind the newest (two days), and the newest, which ends two days ahead. */
+const RUNS = 2;
+const COLS = Math.ceil(HRRR.w / SHARD.w), ROWS = Math.ceil(HRRR.h / SHARD.h);
+const WORKERS = 4;
+const LINEAR = { minFilter: "linear", magFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" } as const;
+
+/** A shard's frames so far: [frame][pixel], and how many frames are in. */
+type Shard = { w: number; h: number; data: Uint8Array; slow: Uint8Array; frames: number; done: boolean };
+/** Built-up frames in a run. */
+const SLOW_RUN = RUN_HOURS / SLOW_STEP;
 
 export function createWeather(onChange: () => void, onError: (m: string) => void) {
   const workers: { w: Worker; busy: number; ready: boolean }[] = [];
-  const blocks = new Map<number, Float32Array>();
+  const shards = new Map<number, Shard>();
   const failed = new Set<number>();
   const flying = new Map<number, number>();
-  let days: number[] = [];
+  let times: number[] = [];
+  let perRun = 0;
   let queue: number[] = [];
-  let want = new Set<number>();
+  let want: number[] = [];
   let nextId = 1;
-  /** bumps whenever what value() would answer may have changed */
-  let rev = 0;
-  const st = { on: true, day: -1, lag: 1, line: 20 };
-  /** The index on the whole grid for the day and lag shown, put together from the blocks in hand; NaN elsewhere. */
-  const field = new Float32Array(HRRR.w * HRRR.h).fill(NaN);
-  let fieldRev = -1;
-  function fill() {
-    if (fieldRev === rev) return;
-    fieldRev = rev;
-    field.fill(NaN);
-    if (st.day < 0) return;
-    for (const [b, f] of blocks) {
-      const [by, bx] = blockRowCol(b);
-      const at = (st.day * LAGS.length + st.lag) * PER;
-      const h = Math.min(BLOCK, HRRR.h - by * BLOCK), w = Math.min(BLOCK, HRRR.w - bx * BLOCK);
-      for (let r = 0; r < h; r++) field.set(f.subarray(at + r * BLOCK, at + r * BLOCK + w), (by * BLOCK + r) * HRRR.w + bx * BLOCK);
-    }
-  }
+  /** bumps when the frames under the view change; the texture is made again when it is behind */
+  let rev = 0, texRev = -1, texAt = 0;
+  /** end: the start (ms) of the last run of the window read; null is the newest run, which ends two days ahead of now. */
+  const st: { on: boolean; end: number | null } = { on: true, end: null };
 
   function pump() {
     while (queue.length) {
-      const w = workers.filter((x) => x.ready).reduce<(typeof workers)[number] | null>((a, b) => (!a || b.busy < a.busy ? b : a), null);
-      if (!w || w.busy >= LANES) return;
-      const b = queue.shift()!;
-      if (blocks.has(b) || failed.has(b) || [...flying.values()].includes(b)) continue;
+      const w = workers.find((x) => x.ready && !x.busy);
+      if (!w) return;
+      const s = queue.shift()!;
+      if (shards.get(s)?.done || failed.has(s) || [...flying.values()].includes(s)) continue;
       const id = nextId++;
-      flying.set(id, b);
+      flying.set(id, s);
       w.busy++;
-      w.w.postMessage({ type: "block", id, block: b } satisfies WxAsk);
+      w.w.postMessage({ type: "shard", id, row: Math.floor(s / COLS), col: s % COLS } satisfies FcAsk);
     }
   }
 
   function start() {
     if (workers.length) return;
     for (let i = 0; i < WORKERS; i++) {
-      const ent = { w: new WxWorker(), busy: 0, ready: false };
-      ent.w.onmessage = (ev: MessageEvent<WxAnswer>) => {
+      const ent = { w: new FcWorker(), busy: 0, ready: false };
+      ent.w.onmessage = (ev: MessageEvent<FcAnswer>) => {
         const d = ev.data;
         if (d.type === "ready") {
           ent.ready = true;
-          if (!days.length) {
-            days = d.days;
-            if (st.day < 0) st.day = days.length - 1;
+          if (!times.length) (times = d.times), (perRun = d.perRun);
+        } else if (d.type === "run") {
+          const s = flying.get(d.id)!;
+          let sh = shards.get(s);
+          if (!sh || d.run === 0) shards.set(s, (sh = { w: d.w, h: d.h, data: new Uint8Array(times.length * d.w * d.h), slow: new Uint8Array((times.length / SLOW_STEP) * d.w * d.h), frames: 0, done: false }));
+          sh.data.set(d.frames, d.run * perRun * d.w * d.h);
+          sh.slow.set(d.slow, d.run * SLOW_RUN * d.w * d.h);
+          sh.frames = (d.run + 1) * perRun;
+          sh.done = d.last;
+          if (d.last) {
+            flying.delete(d.id);
+            ent.busy--;
           }
         } else {
           if (d.id != null) {
-            const b = flying.get(d.id);
+            const s = flying.get(d.id);
             flying.delete(d.id);
             ent.busy--;
-            if (d.type === "block") blocks.set(d.block, d.fos);
-            else if (b != null) failed.add(b);
+            if (s != null) failed.add(s);
           }
-          if (d.type === "error") onError(`weather: ${d.message}`);
+          onError(`weather: ${d.message}`);
         }
         rev++;
         pump();
         onChange();
       };
       ent.w.onerror = (e) => onError(`weather worker: ${e.message || "failed to start"} ${e.filename ? `(${e.filename.split("/").pop()}:${e.lineno})` : ""}`);
-      ent.w.postMessage({ type: "init" } satisfies WxAsk);
+      ent.w.postMessage({ type: "init", runs: RUNS, end: st.end } satisfies FcAsk);
       workers.push(ent);
     }
   }
 
+  /** The byte at a pixel and frame (a frame not in yet reads the newest one that is), 0 where the shard is not in hand. */
+  function byteAt(col: number, row: number, frame: number, builtUp: boolean) {
+    if (col < 0 || row < 0 || col >= HRRR.w || row >= HRRR.h) return 0;
+    const sh = shards.get(Math.floor(row / SHARD.h) * COLS + Math.floor(col / SHARD.w));
+    if (!sh?.frames) return 0;
+    const at = (row % SHARD.h) * sh.w + (col % SHARD.w);
+    return builtUp ? sh.slow[Math.min(frame, sh.frames / SLOW_STEP - 1) * sh.w * sh.h + at]! : sh.data[Math.min(frame, sh.frames - 1) * sh.w * sh.h + at]!;
+  }
+  const xy = new Float32Array(2);
+
   return {
     st,
-    get days() {
-      return days;
+    /** The times (ms) of the frames, oldest first; empty until the store is open. The last two days are ahead of the newest run. */
+    get times() {
+      return times;
     },
-    get rev() {
-      return rev;
-    },
-    /** Change a setting (on, day, lag, line) and repaint. */
     set(patch: Partial<typeof st>) {
+      if ("end" in patch && patch.end !== st.end) {
+        // another window: everything read so far is let go and the workers start over on it
+        for (const w of workers) w.w.terminate();
+        workers.length = 0;
+        shards.clear();
+        failed.clear();
+        flying.clear();
+        times = [];
+        queue = want.slice();
+      }
       Object.assign(st, patch);
-      if (days.length) st.day = Math.min(days.length - 1, Math.max(0, st.day));
-      rev++;
       if (st.on) start();
+      rev++;
+      pump();
       onChange();
     },
-    /** The blocks the cells on screen fall in, nearest the middle first. */
-    need(list: number[]) {
-      want = new Set(list);
+    /** The view (west, south, east, north): the shards under it are read, from its middle outward. */
+    view(bbox: [number, number, number, number]) {
+      const [w, s, e, n] = bbox, found = new Set<number>();
+      const K = 48;
+      for (let j = 0; j <= K; j++) {
+        for (let i = 0; i <= K; i++) {
+          hrrrXY(w + ((e - w) * i) / K, s + ((n - s) * j) / K, xy, 0);
+          if (xy[0]! === xy[0]!) found.add(Math.floor((xy[1]! + 0.5) / SHARD.h) * COLS + Math.floor((xy[0]! + 0.5) / SHARD.w));
+        }
+      }
+      hrrrXY((w + e) / 2, (s + n) / 2, xy, 0);
+      const mc = (xy[0]! === xy[0]! ? xy[0]! : HRRR.w / 2) / SHARD.w - 0.5, mr = (xy[1]! === xy[1]! ? xy[1]! : HRRR.h / 2) / SHARD.h - 0.5;
+      const d2 = (s: number) => (Math.floor(s / COLS) - mr) ** 2 + ((s % COLS) - mc) ** 2;
+      const next = [...found].filter((s) => s >= 0 && s < COLS * ROWS).sort((a, b) => d2(a) - d2(b));
+      if (next.length !== want.length || next.some((b, i) => b !== want[i])) rev++;
+      want = next;
       if (!st.on) return;
       start();
-      queue = list.filter((b) => !blocks.has(b) && !failed.has(b));
+      queue = want.filter((s) => !shards.get(s)?.done && !failed.has(s));
       pump();
     },
+    /** Frames in hand under the view, of all there will be. */
     progress() {
       let got = 0;
-      for (const b of want) if (blocks.has(b) || failed.has(b)) got++;
-      return { got, total: want.size, done: !st.on || (days.length > 0 && got === want.size) };
+      for (const s of want) got += failed.has(s) ? times.length : (shards.get(s)?.frames ?? 0);
+      const total = want.length * times.length;
+      return { got: perRun ? got / perRun : 0, total: perRun ? total / perRun : 0, done: !st.on || (times.length > 0 && got === total) };
     },
     /**
-     * Fosberg, built up, at a place on the weather grid (column, row, fractions of a pixel) on the day and lag
-     * shown, blended between the four pixels around it; NaN where the weather is not in hand.
+     * Put the frames in hand under the view into the shader's texture, when they have changed (at most twice a
+     * second while they are arriving). One byte per pixel and frame, plus a mask of the pixels in hand.
      */
-    value(col: number, row: number): number {
-      if (col !== col) return NaN;
-      fill();
-      const c0 = Math.min(HRRR.w - 2, Math.floor(col)), r0 = Math.min(HRRR.h - 2, Math.floor(row));
-      const fc = col - c0, fr = row - r0, i = r0 * HRRR.w + c0;
-      const a = field[i]!, b = field[i + 1]!, c = field[i + HRRR.w]!, d = field[i + HRRR.w + 1]!;
-      if (a !== a || b !== b || c !== c || d !== d) return field[Math.round(row) * HRRR.w + Math.round(col)]!;
-      return (a * (1 - fc) + b * fc) * (1 - fr) + (c * (1 - fc) + d * fc) * fr;
+    upload(device: Device) {
+      if (texRev === rev || !times.length) return;
+      const now = performance.now();
+      if (now - texAt < 500) return void setTimeout(onChange, 500 - (now - texAt));
+      texRev = rev;
+      texAt = now;
+      const have = want.filter((s) => shards.get(s)?.frames);
+      if (!st.on || !have.length) return setWxTex(null);
+      let r0 = Infinity, r1 = -1, c0 = Infinity, c1 = -1;
+      for (const s of have) {
+        const r = Math.floor(s / COLS), c = s % COLS;
+        r0 = Math.min(r0, r), r1 = Math.max(r1, r), c0 = Math.min(c0, c), c1 = Math.max(c1, c);
+      }
+      const w = Math.min(HRRR.w, (c1 + 1) * SHARD.w) - c0 * SHARD.w, h = Math.min(HRRR.h, (r1 + 1) * SHARD.h) - r0 * SHARD.h, frames = times.length;
+      const nSlow = frames / SLOW_STEP;
+      const data = new Uint8Array(w * h * frames), mask = new Uint8Array(w * h), slow = new Uint8Array(w * h * nSlow);
+      for (const s of have) {
+        const sh = shards.get(s)!, x = ((s % COLS) - c0) * SHARD.w, y = (Math.floor(s / COLS) - r0) * SHARD.h, per = sh.w * sh.h;
+        for (let k = 0; k < frames; k++) {
+          const from = Math.min(k, sh.frames - 1) * per;
+          for (let j = 0; j < sh.h; j++) data.set(sh.data.subarray(from + j * sh.w, from + (j + 1) * sh.w), k * w * h + (y + j) * w + x);
+        }
+        for (let k = 0; k < nSlow; k++) {
+          const from = Math.min(k, sh.frames / SLOW_STEP - 1) * per;
+          for (let j = 0; j < sh.h; j++) slow.set(sh.slow.subarray(from + j * sh.w, from + (j + 1) * sh.w), k * w * h + (y + j) * w + x);
+        }
+        for (let j = 0; j < sh.h; j++) for (let i = 0; i < sh.w; i++) if (sh.data[j * sh.w + i]) mask[(y + j) * w + x + i] = 255;
+      }
+      setWxTex({
+        tex: device.createTexture({ dimension: "2d-array", width: w, height: h, depth: frames, format: "r8unorm", data, mipLevels: 1, sampler: LINEAR }),
+        slow: device.createTexture({ dimension: "2d-array", width: w, height: h, depth: nSlow, format: "r8unorm", data: slow, mipLevels: 1, sampler: LINEAR }),
+        slowStep: SLOW_STEP,
+        mask: device.createTexture({ width: w, height: h, format: "r8unorm", data: mask, mipLevels: 1, sampler: LINEAR }),
+        col0: c0 * SHARD.w,
+        row0: r0 * SHARD.h,
+        w,
+        h,
+        frames,
+      });
     },
     /**
-     * How far the fuel there is primed, 0 to 1: 0 under the line, 1 a point and a half over it, so the edge
-     * between gray and color is a short blend and not the outline of a weather pixel. 0 where not known yet.
+     * The weather score at a place and an hour (fractions blend the two hours around it), each hour's or the built-up
+     * one; NaN where not in hand.
      */
-    lit(col: number, row: number): number {
-      const v = this.value(col, row);
-      return v === v ? Math.min(1, Math.max(0, (v - st.line) / 1.5)) : 0;
+    value(lon: number, lat: number, frame: number, builtUp: boolean): number {
+      hrrrXY(lon, lat, xy, 0);
+      if (xy[0]! !== xy[0]! || !times.length) return NaN;
+      const n = builtUp ? times.length / SLOW_STEP : times.length;
+      const f = Math.min(n - 1, Math.max(0, builtUp ? frame / SLOW_STEP : frame)), f0 = Math.floor(f), f1 = Math.min(n - 1, f0 + 1), u = f - f0;
+      const c0 = Math.floor(xy[0]!), r0 = Math.floor(xy[1]!), fc = xy[0]! - c0, fr = xy[1]! - r0;
+      let acc = 0, wsum = 0;
+      for (let j = 0; j < 2; j++) for (let i = 0; i < 2; i++) {
+        const a = byteAt(c0 + i, r0 + j, f0, builtUp), b = byteAt(c0 + i, r0 + j, f1, builtUp);
+        if (!a || !b) continue;
+        const w = (i ? fc : 1 - fc) * (j ? fr : 1 - fr);
+        acc += w * (a + (b - a) * u);
+        wsum += w;
+      }
+      return wsum > 0.01 ? TERM_LO + ((acc / wsum - 1) / 254) * (TERM_HI - TERM_LO) : NaN;
     },
   };
 }

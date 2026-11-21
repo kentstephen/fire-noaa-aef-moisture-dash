@@ -1,5 +1,9 @@
+import type { Layer } from "@deck.gl/core";
+import { LayerExtension } from "@deck.gl/core";
 import { GeoArrowPathLayer, GeoArrowSolidPolygonLayer } from "@geoarrow/deck.gl-layers";
 import { Field, FixedSizeList, Float64, List, makeData, RecordBatch, Schema, Struct, Uint8 } from "apache-arrow";
+
+import { CELL_INJECT, riskModule, riskProps } from "./risk";
 
 /** Pentagons as GeoArrow, for both kinds of cells on the map: the baked ones (cells.ts) and the ones made here (fine.ts). */
 
@@ -57,6 +61,21 @@ export function lineLayer(id: string, g: { batch: RecordBatch; line: unknown }, 
 export const colorData = (rgba: Uint8Array): unknown =>
   makeData({ type: RGBA, length: rgba.length / 4, nullCount: 0, child: makeData({ type: new Uint8(), length: rgba.length, nullCount: 0, data: rgba }) });
 
+/**
+ * The cells take their color in the shader, the same way the tiles do (risk.ts): a cell's fill carries its fuel in
+ * the red byte, and each screen pixel of it is shaded by the fuel and the weather at that spot.
+ */
+class RiskCells extends LayerExtension {
+  static extensionName = "RiskCells";
+  getShaders() {
+    return { modules: [riskModule], inject: CELL_INJECT };
+  }
+  draw(this: Layer) {
+    this.setShaderModuleProps(riskProps(this.context.device));
+  }
+}
+const RISK_CELLS = [new RiskCells()];
+
 /** Kyle Barron's polygon layer, given the triangles (made in a worker) instead of cutting them on this thread. */
 export class CellLayer extends GeoArrowSolidPolygonLayer<{ tris: Uint32Array; beforeId?: string }> {
   static layerName = "CellLayer";
@@ -77,6 +96,7 @@ export function cellLayer(id: string, g: { batch: RecordBatch; poly: unknown; co
     filled: true,
     extruded: false,
     pickable: false,
+    extensions: RISK_CELLS,
     // read by the MapLibre overlay: the layer draws under the labels
     beforeId,
   });

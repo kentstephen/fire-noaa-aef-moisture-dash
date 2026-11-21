@@ -6,7 +6,7 @@ import * as maplibregl from "maplibre-gl";
 import maplibreWorkerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
 
 import { cellM, createCells } from "./cells";
-import { createFine, FINE_RES } from "./fine";
+import { createFine } from "./fine";
 import { cssGradient, VIRIDIS_50, volT } from "./ramp";
 
 maplibregl.setWorkerUrl(maplibreWorkerUrl);
@@ -101,7 +101,7 @@ function status() {
       ? `Reading cells<span>${p.got} of ${p.total} row groups</span>`
       : `Reading the 10 m embeddings<span>${f.got} of ${f.total} chunks</span>`;
   $(".zoom").textContent = fine.active
-    ? `Cells about ${km(cellM(FINE_RES))} across (A5 resolution ${FINE_RES}), made here from the 10 m embeddings`
+    ? `Cells about ${km(cellM(fine.res))} across (A5 resolution ${fine.res}), made here from the 10 m embeddings`
     : cells.res
       ? `Cells about ${km(cellM(cells.res))} across (A5 resolution ${cells.res})`
       : "";
@@ -133,7 +133,7 @@ function readout() {
   const c = pointer && (fine.at(pointer.lon, pointer.lat) ?? cells.at(pointer.lon, pointer.lat));
   tip.classList.toggle("on", !!c);
   if (!c || !pointer) return;
-  tip.innerHTML = `<div class="v"><b>${num(c.vol)}</b> m</div><div class="s">cover times height</div><div class="s">cell about ${km(cellM(c.res))} across</div><div class="s">${c.n.toLocaleString("en-US")} pixels of 10 m</div>`;
+  tip.innerHTML = `<div class="v"><b>${num(c.vol)}</b> m</div><div class="s">cover times height</div><div class="s">cell about ${km(cellM(c.res))} across</div>${c.res >= 19 ? "" : `<div class="s">${c.n.toLocaleString("en-US")} pixels of 10 m</div>`}`;
   const r = tip.getBoundingClientRect();
   const x = pointer.x + 16 + r.width > innerWidth ? pointer.x - 16 - r.width : pointer.x + 16;
   const y = Math.min(innerHeight - r.height - 8, pointer.y + 16);

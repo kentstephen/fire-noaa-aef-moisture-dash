@@ -118,18 +118,25 @@ async function read(id: number, cy: number, cx: number, res: number) {
   const vol = volume(e, N);
   const acc = new Map<bigint, { s: number; n: number }>();
   const pt: [number, number] = [0, 0];
+  // a cell about the size of a pixel (resolution 19, 11 m) would sometimes hold no pixel center: there each pixel is
+  // counted at four points inside it, so every cell is reached and a cell across two pixels gets both
+  const sub = res >= 19 ? [0.25, 0.75] : [0.5];
   for (let y = 0; y < CHUNK; y++) {
-    pt[1] = Y0 - (cy * CHUNK + y + 0.5) * RES;
     for (let x = 0; x < CHUNK; x++) {
       const v = vol[y * CHUNK + x]!;
       if (v !== v) continue;
-      pt[0] = X0 + (cx * CHUNK + x + 0.5) * RES;
-      const c = lonLatToCell(pt as never, res);
-      const a = acc.get(c);
-      if (a) {
-        a.s += v;
-        a.n++;
-      } else acc.set(c, { s: v, n: 1 });
+      for (const dy of sub) {
+        pt[1] = Y0 - (cy * CHUNK + y + dy) * RES;
+        for (const dx of sub) {
+          pt[0] = X0 + (cx * CHUNK + x + dx) * RES;
+          const c = lonLatToCell(pt as never, res);
+          const a = acc.get(c);
+          if (a) {
+            a.s += v;
+            a.n++;
+          } else acc.set(c, { s: v, n: 1 });
+        }
+      }
     }
   }
   const count = acc.size;

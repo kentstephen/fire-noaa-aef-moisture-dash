@@ -13,14 +13,18 @@ import { rampInto, volT } from "./ramp";
 
 /** From this zoom the embeddings are read: a full window is about 50 to 120 chunks of 2.6 MB. */
 export const FINE_ZOOM = 12.5;
-/** The cells made: about 22 m across, six 10 m pixels each. One finer and some cells would hold no pixel. */
-export const FINE_RES = 18;
+/**
+ * The cells made: resolution 18 (about 22 m, six 10 m pixels each), and from FINEST_ZOOM resolution 19 (about 11 m,
+ * the size of a pixel, which is as far as the embeddings go).
+ */
+const FINEST_ZOOM = 14;
+export const fineRes = (zoom: number) => (zoom >= FINEST_ZOOM ? 19 : 18);
 /** AlphaEarth on Source Cooperative, through its gateway; the year's place on the time axis (2017 is 0). */
 const ROOT = "https://data.source.coop/tge-labs/aef-mosaic";
 const YEAR = 2025;
 const RES = 8.983111749910169e-5, X0 = -180, Y0 = 83.68570533713473, CHUNK = 256;
-/** Chunks kept (about 1.5 MB each as cells) before the ones seen longest ago are let go. */
-const MAX_CHUNKS = 260;
+/** Chunks kept (1.5 MB each as cells at resolution 18, 6 MB at 19) before the ones seen longest ago are let go. */
+const MAX_CHUNKS = 120;
 /** Reads in flight per worker: the wait is the network, the scoring is one at a time anyway. */
 const LANES = 3;
 
@@ -44,8 +48,14 @@ export function createFine(onChange: () => void, onError: (m: string) => void) {
   const chunks = new Map<string, Chunk>();
   const failed = new Set<string>();
   const flying = new Map<number, string>();
-  /** Every cell's volume summed over all the chunks in hand, and its pixels. */
-  const totals = new Map<bigint, { s: number; n: number }>();
+  /** Per resolution: every cell's volume summed over all the chunks in hand, and its pixels. */
+  const totalsBy = new Map<number, Map<bigint, { s: number; n: number }>>();
+  const totalsOf = (res: number) => {
+    let t = totalsBy.get(res);
+    if (!t) totalsBy.set(res, (t = new Map()));
+    return t;
+  };
+  let res = 18;
   let queue: string[] = [];
   let want: string[] = [];
   let active = false;
@@ -53,12 +63,14 @@ export function createFine(onChange: () => void, onError: (m: string) => void) {
   let tick = 0;
   let ready = false;
 
-  const key = (cy: number, cx: number) => `${cy}/${cx}`;
+  const key = (r: number, cy: number, cx: number) => `${r}/${cy}/${cx}`;
+  const parts = (k: string) => k.split("/").map(Number) as [number, number, number];
 
   function recolor(k: string) {
     const c = chunks.get(k);
     if (!c || !c.own.length) return;
     const rgba = new Uint8Array(c.own.length * 4);
+    const totals = totalsOf(parts(k)[0]);
     for (let i = 0; i < c.own.length; i++) {
       const t = totals.get(c.cells[c.own[i]!]!)!;
       rampInto(rgba, 4 * i, volT(t.s / t.n));
@@ -70,6 +82,7 @@ export function createFine(onChange: () => void, onError: (m: string) => void) {
   function drop(k: string) {
     const c = chunks.get(k);
     if (!c) return;
+    const totals = totalsOf(parts(k)[0]);
     for (let i = 0; i < c.cells.length; i++) {
       const t = totals.get(c.cells[i]!);
       if (!t) continue;
@@ -81,6 +94,8 @@ export function createFine(onChange: () => void, onError: (m: string) => void) {
   }
 
   function arrived(k: string, d: Extract<FineAnswer, { type: "chunk" }>) {
+    const [r, cy, cx] = parts(k);
+    const totals = totalsOf(r);
     for (let i = 0; i < d.cells.length; i++) {
       const t = totals.get(d.cells[i]!);
       if (t) {
@@ -90,8 +105,7 @@ export function createFine(onChange: () => void, onError: (m: string) => void) {
     }
     chunks.set(k, { cells: d.cells, sum: d.sum, n: d.n, own: d.own, tris: d.tris, ...polygonBatch(d.coords, d.rings), color: null, seen: tick, rev: 0 });
     // the cells on its edges now have their other part: this chunk and the eight around it take their colors again
-    const [cy, cx] = k.split("/").map(Number) as [number, number];
-    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) recolor(key(cy + dy, cx + dx));
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) recolor(key(r, cy + dy, cx + dx));
     if (chunks.size > MAX_CHUNKS) {
       const keep = new Set(want);
       const old = [...chunks].filter(([q]) => !keep.has(q)).sort((a, b) => a[1].seen - b[1].seen);
@@ -109,11 +123,11 @@ export function createFine(onChange: () => void, onError: (m: string) => void) {
       if (w.busy >= LANES) return;
       const k = queue.shift()!;
       if (chunks.has(k) || failed.has(k) || [...flying.values()].includes(k)) continue;
-      const [cy, cx] = k.split("/").map(Number) as [number, number];
+      const [r, cy, cx] = parts(k);
       const id = nextId++;
       flying.set(id, k);
       w.busy++;
-      w.w.postMessage({ type: "read", id, cy, cx, res: FINE_RES } satisfies FineAsk);
+      w.w.postMessage({ type: "read", id, cy, cx, res: r } satisfies FineAsk);
     }
   }
 
@@ -160,11 +174,12 @@ export function createFine(onChange: () => void, onError: (m: string) => void) {
         return;
       }
       tick++;
+      res = fineRes(zoom);
       const cx0 = Math.floor((bbox[0] - X0) / RES / CHUNK), cx1 = Math.floor((bbox[2] - X0) / RES / CHUNK);
       const cy0 = Math.floor((Y0 - bbox[3]) / RES / CHUNK), cy1 = Math.floor((Y0 - bbox[1]) / RES / CHUNK);
       const mx = (cx0 + cx1) / 2, my = (cy0 + cy1) / 2;
       const list: [number, string][] = [];
-      for (let cy = cy0; cy <= cy1; cy++) for (let cx = cx0; cx <= cx1; cx++) list.push([(cx - mx) ** 2 + (cy - my) ** 2, key(cy, cx)]);
+      for (let cy = cy0; cy <= cy1; cy++) for (let cx = cx0; cx <= cx1; cx++) list.push([(cx - mx) ** 2 + (cy - my) ** 2, key(res, cy, cx)]);
       // from the middle of the view outward
       want = list.sort((a, b) => a[0] - b[0]).map((l) => l[1]);
       for (const k of want) {
@@ -177,6 +192,9 @@ export function createFine(onChange: () => void, onError: (m: string) => void) {
     get active() {
       return active;
     },
+    get res() {
+      return res;
+    },
     progress() {
       const got = want.filter((k) => chunks.has(k) || failed.has(k)).length;
       return { got, total: want.length, done: !active || got === want.length };
@@ -184,15 +202,19 @@ export function createFine(onChange: () => void, onError: (m: string) => void) {
     /** The fine cell under a point: its mean volume (m) and its 10 m pixels. */
     at(lon: number, lat: number) {
       if (!active) return null;
-      const t = totals.get(lonLatToCell([lon, lat] as never, FINE_RES));
-      return t ? { vol: t.s / t.n, n: t.n, res: FINE_RES } : null;
+      const t = totalsOf(res).get(lonLatToCell([lon, lat] as never, res));
+      return t ? { vol: t.s / t.n, n: t.n, res } : null;
     },
     layers(beforeId: string | undefined) {
       if (!active) return [];
       const out = [];
       for (const k of want) {
-        const c = chunks.get(k);
-        if (c?.color && c.own.length) out.push(cellLayer(`fine-${k}`, c as Chunk & { color: unknown }, beforeId));
+        // until a chunk is in at this resolution, the same chunk at the other one stays up if it is in hand
+        const [r, cy, cx] = parts(k);
+        const other = key(r === 19 ? 18 : 19, cy, cx);
+        const id = chunks.get(k)?.color ? k : other;
+        const c = chunks.get(id);
+        if (c?.color && c.own.length) out.push(cellLayer(`fine-${id}`, c as Chunk & { color: unknown }, beforeId));
       }
       return out;
     },

@@ -81,7 +81,7 @@ def main():
     for k in ("drivable", "major", "track", "power", "building"):
         d[f"l_km_{k}"] = np.log(0.125 + d[f"km_{k}"])
     d["l_buildings"] = np.log1p(d.buildings_1km)
-    doy = pd.to_datetime(d.discovered, utc=True).dt.dayofyear
+    doy = pd.to_datetime(d.discovered, utc=True).dt.day_of_year
     d["doy_sin"], d["doy_cos"] = np.sin(2 * np.pi * doy / 365.25), np.cos(2 * np.pi * doy / 365.25)
     cols = sorted({c for v in SETS.values() for c in v})
     d = d.dropna(subset=cols).reset_index(drop=True)
